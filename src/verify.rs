@@ -1,7 +1,6 @@
 use burn::{
     data::dataset::Dataset,
-    module::AutodiffModule,
-    tensor::{backend::AutodiffBackend, Int, Tensor},
+    tensor::{backend::Backend, Int, Tensor},
 };
 
 use crate::data::ModularAdditionDataset;
@@ -9,7 +8,7 @@ use crate::model::Transformer;
 
 /// Verify that the model actually learned modular addition
 /// by testing it on ALL possible examples systematically
-pub fn verify_full_accuracy<B: AutodiffBackend>(
+pub fn verify_full_accuracy<B: Backend>(
     model: &Transformer<B>,
     device: &B::Device,
 ) -> (f32, f32) {
@@ -35,7 +34,7 @@ pub fn verify_full_accuracy<B: AutodiffBackend>(
 }
 
 /// Test model on ALL examples in dataset (no random sampling)
-fn test_all_examples<B: AutodiffBackend>(
+fn test_all_examples<B: Backend>(
     model: &Transformer<B>,
     dataset: &ModularAdditionDataset,
     device: &B::Device,
@@ -61,8 +60,8 @@ fn test_all_examples<B: AutodiffBackend>(
         let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
             .reshape([batch_len, 3]);
 
-        let logits = model.clone().valid().forward(inputs.inner());
-        let predictions = logits.argmax(1).squeeze::<1>(1);
+        let logits = model.forward(inputs);
+        let predictions = logits.argmax(1).squeeze::<1>();
         let predictions_vec: Vec<i32> = predictions.into_data().to_vec().unwrap();
 
         let correct = predictions_vec
@@ -78,7 +77,7 @@ fn test_all_examples<B: AutodiffBackend>(
 }
 
 /// Test specific examples to see if model actually computes mod 97
-pub fn test_specific_examples<B: AutodiffBackend>(
+pub fn test_specific_examples<B: Backend>(
     model: &Transformer<B>,
     device: &B::Device,
 ) {
@@ -101,8 +100,8 @@ pub fn test_specific_examples<B: AutodiffBackend>(
         let input = Tensor::<B, 1, Int>::from_ints(input_vec.as_slice(), device)
             .reshape([1, 3]);
 
-        let logits = model.clone().valid().forward(input.inner());
-        let prediction = logits.argmax(1).squeeze::<1>(1);
+        let logits = model.forward(input);
+        let prediction = logits.argmax(1).squeeze::<1>();
         let pred_value: i32 = prediction.into_data().to_vec().unwrap()[0];
 
         let correct = if pred_value == expected as i32 { "✓" } else { "✗" };
