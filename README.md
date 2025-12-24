@@ -11,7 +11,7 @@ renderer.
 1) Enable the TUI feature in `Cargo.toml`:
 
 ```toml
-burn = { version = "0.20.0-pre.6", default-features = false, features = ["std", "tui", "train", "wgpu", "autodiff", "fusion"] }
+burn = { version = "0.20.0-pre.6", default-features = false, features = ["std", "tui", "train", "wgpu", "autodiff"] }
 ```
 
 2) Run training:
