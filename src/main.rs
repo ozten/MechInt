@@ -147,7 +147,8 @@ fn main() {
     println!();
 
     let fft_analysis = analysis::analyze_embeddings_fft(&model);
-    if let Err(e) = analysis::save_fft_analysis(&fft_analysis, "fft_analysis.json") {
+    let fft_analysis_path = format!("{artifact_dir}/fft_analysis.json");
+    if let Err(e) = analysis::save_fft_analysis(&fft_analysis, &fft_analysis_path) {
         eprintln!("⚠️  Warning: Could not save FFT analysis: {}", e);
     }
 
@@ -166,11 +167,13 @@ fn main() {
         }
     }
 
-    if let Err(e) = loss_history.save("loss_history.json") {
+    let loss_history_path = format!("{artifact_dir}/loss_history.json");
+    if let Err(e) = loss_history.save(&loss_history_path) {
         eprintln!("⚠️  Warning: Could not save loss history: {}", e);
     }
 
-    if let Err(e) = accuracy_history.save("accuracy_history.json") {
+    let accuracy_history_path = format!("{artifact_dir}/accuracy_history.json");
+    if let Err(e) = accuracy_history.save(&accuracy_history_path) {
         eprintln!("⚠️  Warning: Could not save accuracy history: {}", e);
     }
 
