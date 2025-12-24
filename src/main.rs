@@ -115,6 +115,16 @@ fn main() {
     let (loss_history, accuracy_history) =
         load_metric_history(artifact_dir, num_epochs, steps_per_epoch);
 
+    if let Some(epoch) = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0) {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
+            eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
+        }
+    }
+
+    if let Err(e) = copy_checkpoint_set(artifact_dir, num_epochs, "final") {
+        eprintln!("⚠️  Warning: Could not save final checkpoint: {}", e);
+    }
+
     println!();
     println!("{}", "=".repeat(80));
     println!("✅ Training complete!");
@@ -338,6 +348,47 @@ fn read_metric_entries(
         .filter_map(|line| NumericEntry::deserialize(line).ok())
         .map(|entry| entry.current())
         .collect()
+}
+
+fn find_grokking_epoch(
+    artifact_dir: &str,
+    num_epochs: usize,
+    steps_per_epoch: usize,
+    threshold_pct: f64,
+) -> Option<usize> {
+    for epoch in 1..=num_epochs {
+        let values = read_metric_entries(artifact_dir, "valid", epoch, "Accuracy");
+        for (idx, value) in values.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            if step > 1000 && value >= threshold_pct {
+                return Some(epoch);
+            }
+        }
+    }
+
+    None
+}
+
+fn copy_checkpoint_set(
+    artifact_dir: &str,
+    epoch: usize,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source_dir = Path::new(artifact_dir).join("checkpoint");
+    let dest_dir = Path::new(artifact_dir).join("checkpoint_labeled");
+    fs::create_dir_all(&dest_dir)?;
+
+    for name in ["model", "optim", "scheduler"] {
+        let src = source_dir.join(format!("{name}-{epoch}.mpk"));
+        if !src.exists() {
+            continue;
+        }
+
+        let dst = dest_dir.join(format!("{name}-{label}.mpk"));
+        fs::copy(src, dst)?;
+    }
+
+    Ok(())
 }
 
 /// Compute loss on FULL dataset (no random sampling)
