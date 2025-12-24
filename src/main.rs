@@ -11,10 +11,8 @@ mod verify;
 use burn::{
     backend::{wgpu::WgpuDevice, Autodiff, Wgpu},
     data::dataset::Dataset,
-    nn::loss::CrossEntropyLossConfig,
     optim::{lr_scheduler::linear::LinearLrSchedulerConfig, AdamConfig},
     record::CompactRecorder,
-    tensor::{backend::Backend, Int, Tensor},
     train::{
         metric::{AccuracyMetric, LossMetric, NumericEntry},
         Learner, LearningParadigm, SupervisedTraining, TrainingStrategy,
@@ -389,98 +387,4 @@ fn copy_checkpoint_set(
     }
 
     Ok(())
-}
-
-/// Compute loss on FULL dataset (no random sampling)
-fn compute_loss<B: Backend>(
-    model: &Transformer<B>,
-    dataset: &ModularAdditionDataset,
-    device: &B::Device,
-) -> f64 {
-    let total = dataset.len();
-    let mut total_loss = 0.0f64;
-    let mut total_count = 0;
-
-    // Process in batches to avoid memory issues
-    let batch_size = 100;
-    for batch_start in (0..total).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(total);
-        let batch_len = batch_end - batch_start;
-
-        let mut inputs_vec = Vec::new();
-        let mut targets_vec = Vec::new();
-
-        for idx in batch_start..batch_end {
-            let (input, target) = dataset.get(idx).unwrap();
-            inputs_vec.extend(input);
-            targets_vec.push(target as i32);
-        }
-
-        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
-            .reshape([batch_len, 3]);
-        let targets = Tensor::<B, 1, Int>::from_ints(targets_vec.as_slice(), device);
-
-        // Forward pass without gradients
-        let logits = model.forward(inputs);
-
-        // Compute loss on inner backend
-        let loss = CrossEntropyLossConfig::new()
-            .init(device)
-            .forward(logits, targets);
-
-        // Extract loss value as f64
-        let loss_data = loss.into_data();
-        let loss_vec: Vec<f32> = loss_data.to_vec().unwrap();
-        let loss_val = loss_vec[0] as f64;
-        total_loss += loss_val * batch_len as f64;
-        total_count += batch_len;
-    }
-
-    total_loss / total_count as f64
-}
-
-/// Compute accuracy on FULL dataset (no random sampling)
-/// This matches the paper's methodology and avoids variance from sampling
-fn compute_accuracy<B: Backend>(
-    model: &Transformer<B>,
-    dataset: &ModularAdditionDataset,
-    _batch_size: usize,
-    device: &B::Device,
-) -> f32 {
-    let total = dataset.len();
-    let mut total_correct = 0;
-
-    // Process in batches to avoid memory issues
-    let batch_size = 100;
-    for batch_start in (0..total).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(total);
-        let batch_len = batch_end - batch_start;
-
-        let mut inputs_vec = Vec::new();
-        let mut targets_vec = Vec::new();
-
-        for idx in batch_start..batch_end {
-            let (input, target) = dataset.get(idx).unwrap();
-            inputs_vec.extend(input);
-            targets_vec.push(target as i32);
-        }
-
-        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
-            .reshape([batch_len, 3]);
-
-        // Forward pass without gradients
-        let logits = model.forward(inputs);
-        let predictions = logits.argmax(1).squeeze::<1>();
-        let predictions_vec: Vec<i32> = predictions.into_data().to_vec().unwrap();
-
-        let correct = predictions_vec
-            .iter()
-            .zip(targets_vec.iter())
-            .filter(|(p, t)| p == t)
-            .count();
-
-        total_correct += correct;
-    }
-
-    total_correct as f32 / total as f32
 }
