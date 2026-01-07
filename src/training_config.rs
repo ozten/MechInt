@@ -69,6 +69,68 @@ impl TrainingConfig {
                 .with_weight_decay(weight_decay),
         }
     }
+
+    pub fn validate_grokking_spec(&self) -> Result<(), String> {
+        if self.batch_size != 512 {
+            return Err(format!(
+                "batch_size must be 512, got {}",
+                self.batch_size
+            ));
+        }
+        if self.seed != 42 {
+            return Err(format!("seed must be 42, got {}", self.seed));
+        }
+        if (self.base_learning_rate - 1e-3).abs() > 1e-12 {
+            return Err(format!(
+                "base_learning_rate must be 1e-3, got {}",
+                self.base_learning_rate
+            ));
+        }
+        if !(10..=50).contains(&self.warmup_steps) {
+            return Err(format!(
+                "warmup_steps must be between 10 and 50, got {}",
+                self.warmup_steps
+            ));
+        }
+        if self.num_epochs < 10_000 {
+            return Err(format!(
+                "num_epochs must be at least 10000, got {}",
+                self.num_epochs
+            ));
+        }
+        let train_fraction = self.train_fraction();
+        if !(0.3..=0.5).contains(&train_fraction) {
+            return Err(format!(
+                "train_fraction must be between 0.3 and 0.5, got {:.3}",
+                train_fraction
+            ));
+        }
+        match self.optimizer {
+            OptimizerSpec::AdamW {
+                beta_1,
+                beta_2,
+                epsilon,
+                weight_decay,
+            } => {
+                if (beta_1 - 0.9).abs() > 1e-6 {
+                    return Err(format!("beta_1 must be 0.9, got {}", beta_1));
+                }
+                if (beta_2 - 0.98).abs() > 1e-6 {
+                    return Err(format!("beta_2 must be 0.98, got {}", beta_2));
+                }
+                if (epsilon - 1e-8).abs() > 1e-12 {
+                    return Err(format!("epsilon must be 1e-8, got {}", epsilon));
+                }
+                if (weight_decay - 1.0).abs() > 1e-6 {
+                    return Err(format!(
+                        "weight_decay must be 1.0, got {}",
+                        weight_decay
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -101,5 +163,67 @@ mod tests {
                 assert_eq!(epsilon, 1e-8);
             }
         }
+    }
+
+    fn expect_invalid(config: TrainingConfig) {
+        assert!(config.validate_grokking_spec().is_err());
+    }
+
+    #[test]
+    fn test_training_config_validation_flags_bad_params() {
+        let mut config = TrainingConfig::default();
+        assert!(config.validate_grokking_spec().is_ok());
+
+        config.batch_size = 128;
+        expect_invalid(config.clone());
+
+        config.batch_size = 512;
+        config.seed = 7;
+        expect_invalid(config.clone());
+
+        config.seed = 42;
+        config.base_learning_rate = 5e-4;
+        expect_invalid(config.clone());
+
+        config.base_learning_rate = 1e-3;
+        config.warmup_steps = 5;
+        expect_invalid(config.clone());
+
+        config.warmup_steps = 10;
+        config.num_epochs = 5000;
+        expect_invalid(config.clone());
+
+        config.num_epochs = 20_000;
+        config.optimizer = OptimizerSpec::AdamW {
+            beta_1: 0.8,
+            beta_2: 0.98,
+            epsilon: 1e-8,
+            weight_decay: 1.0,
+        };
+        expect_invalid(config.clone());
+
+        config.optimizer = OptimizerSpec::AdamW {
+            beta_1: 0.9,
+            beta_2: 0.95,
+            epsilon: 1e-8,
+            weight_decay: 1.0,
+        };
+        expect_invalid(config.clone());
+
+        config.optimizer = OptimizerSpec::AdamW {
+            beta_1: 0.9,
+            beta_2: 0.98,
+            epsilon: 1e-6,
+            weight_decay: 1.0,
+        };
+        expect_invalid(config.clone());
+
+        config.optimizer = OptimizerSpec::AdamW {
+            beta_1: 0.9,
+            beta_2: 0.98,
+            epsilon: 1e-8,
+            weight_decay: 0.5,
+        };
+        expect_invalid(config);
     }
 }

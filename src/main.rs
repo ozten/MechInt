@@ -29,6 +29,9 @@ type MyAutodiffBackend = Autodiff<WgpuBackend>;
 
 fn main() {
     let training_config = TrainingConfig::default();
+    training_config
+        .validate_grokking_spec()
+        .expect("Training config must match grokking spec");
 
     println!("🚀 Grokking experiment starting...");
     println!("Configuration:");
