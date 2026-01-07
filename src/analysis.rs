@@ -168,6 +168,44 @@ fn restrict_signal_to_top_k_frequencies(signal: &[f64], top_k: usize) -> Vec<f64
     buffer.iter().map(|c| c.re * scale).collect()
 }
 
+fn exclude_top_k_frequencies(signal: &[f64], top_k: usize) -> Vec<f64> {
+    if signal.is_empty() {
+        return Vec::new();
+    }
+
+    if top_k == 0 {
+        return signal.to_vec();
+    }
+
+    if top_k >= signal.len() {
+        return vec![0.0; signal.len()];
+    }
+
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(signal.len());
+
+    let mut buffer: Vec<Complex<f64>> = signal
+        .iter()
+        .map(|&x| Complex::new(x, 0.0))
+        .collect();
+    fft.process(&mut buffer);
+
+    let magnitudes: Vec<f64> = buffer.iter().map(|c| c.norm()).collect();
+    let remove = top_k_frequency_indices(&magnitudes, top_k);
+    let remove_set: HashSet<usize> = remove.into_iter().collect();
+
+    for (idx, value) in buffer.iter_mut().enumerate() {
+        if remove_set.contains(&idx) {
+            *value = Complex::new(0.0, 0.0);
+        }
+    }
+
+    inverse_fft(&mut buffer);
+
+    let scale = 1.0 / signal.len() as f64;
+    buffer.iter().map(|c| c.re * scale).collect()
+}
+
 fn restricted_token_embedding_weights<B: Backend>(
     model: &Transformer<B>,
     top_k: usize,
@@ -189,6 +227,29 @@ fn restricted_token_embedding_weights<B: Backend>(
     }
 
     restricted
+}
+
+fn excluded_token_embedding_weights<B: Backend>(
+    model: &Transformer<B>,
+    top_k: usize,
+) -> Vec<f32> {
+    let weight = model.token_embedding_weights();
+    let [vocab_size, d_model] = weight.dims();
+    let weight_data: Vec<f32> = weight.into_data().to_vec().unwrap();
+    let mut excluded = vec![0.0f32; weight_data.len()];
+
+    for dim in 0..d_model {
+        let mut column = Vec::with_capacity(vocab_size);
+        for token in 0..vocab_size {
+            column.push(weight_data[token * d_model + dim] as f64);
+        }
+        let filtered = exclude_top_k_frequencies(&column, top_k);
+        for token in 0..vocab_size {
+            excluded[token * d_model + dim] = filtered[token] as f32;
+        }
+    }
+
+    excluded
 }
 
 pub fn compute_restricted_loss<B: Backend>(
@@ -249,6 +310,64 @@ pub fn compute_restricted_loss<B: Backend>(
     Ok(total_loss / total_batches as f64)
 }
 
+pub fn compute_excluded_loss<B: Backend>(
+    model: &Transformer<B>,
+    dataset: &ModularAdditionDataset,
+    device: &B::Device,
+    top_k: usize,
+    batch_size: usize,
+) -> Result<f64, String> {
+    if batch_size == 0 {
+        return Err("batch_size must be greater than 0".to_string());
+    }
+
+    let excluded_weights = excluded_token_embedding_weights(model, top_k);
+    let [vocab_size, d_model] = model.token_embedding_weights().dims();
+    let token_weights = Tensor::<B, 2>::from_data(
+        TensorData::new(excluded_weights, [vocab_size, d_model]),
+        device,
+    );
+
+    let loss_fn = CrossEntropyLossConfig::new().init(device);
+    let mut total_loss = 0.0f64;
+    let mut total_batches = 0usize;
+
+    for batch_start in (0..dataset.len()).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(dataset.len());
+        let batch_len = batch_end - batch_start;
+        if batch_len == 0 {
+            break;
+        }
+
+        let mut inputs_vec = Vec::with_capacity(batch_len * 3);
+        let mut targets_vec = Vec::with_capacity(batch_len);
+
+        for idx in batch_start..batch_end {
+            let (input, target) = dataset.get(idx).ok_or_else(|| {
+                format!("missing dataset sample at index {}", idx)
+            })?;
+            inputs_vec.extend(input.iter().map(|value| *value as i32));
+            targets_vec.push(target as i32);
+        }
+
+        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
+            .reshape([batch_len, 3]);
+        let targets = Tensor::<B, 1, Int>::from_ints(targets_vec.as_slice(), device);
+
+        let logits = model.forward_with_token_weights(inputs, token_weights.clone());
+        let loss = loss_fn.forward(logits, targets);
+        let loss_value: f64 = loss.into_data().to_vec().unwrap().get(0).copied().unwrap_or(0.0);
+        total_loss += loss_value;
+        total_batches += 1;
+    }
+
+    if total_batches == 0 {
+        return Err("no batches computed for excluded loss".to_string());
+    }
+
+    Ok(total_loss / total_batches as f64)
+}
+
 /// Find the index of the dominant frequency (excluding DC component at index 0)
 fn find_dominant_frequency(magnitudes: &[f64]) -> usize {
     magnitudes
@@ -275,6 +394,31 @@ pub fn save_fft_analysis(analysis: &FFTAnalysis, filename: &str) -> std::io::Res
 pub struct LossHistory {
     pub train_snapshots: Vec<(usize, f64)>, // (step, loss)
     pub val_snapshots: Vec<(usize, f64)>,   // (step, loss)
+}
+
+/// Track excluded loss over time (top-k frequencies removed)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExcludedLossHistory {
+    pub snapshots: Vec<(usize, f64)>, // (step, loss)
+}
+
+impl ExcludedLossHistory {
+    pub fn new() -> Self {
+        Self {
+            snapshots: Vec::new(),
+        }
+    }
+
+    pub fn add_snapshot(&mut self, step: usize, loss: f64) {
+        self.snapshots.push((step, loss));
+    }
+
+    pub fn save(&self, filename: &str) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(filename, json)?;
+        println!("💾 Excluded loss history saved to: {}", filename);
+        Ok(())
+    }
 }
 
 impl LossHistory {
@@ -355,6 +499,249 @@ pub fn extract_all_embeddings<B: Backend>(model: &Transformer<B>) -> Vec<Vec<f64
     embeddings
 }
 
+#[derive(Debug, Clone)]
+pub struct EmbeddingClockConfig {
+    pub max_radius_std_fraction: f64,
+    pub min_angular_coverage: f64,
+    pub max_mean_angle_error: f64,
+    pub min_order_fraction: f64,
+}
+
+impl EmbeddingClockConfig {
+    pub fn default_for_modulus(_modulus: usize) -> Self {
+        Self {
+            max_radius_std_fraction: 0.1,
+            min_angular_coverage: 0.9,
+            max_mean_angle_error: 0.35,
+            min_order_fraction: 0.9,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddingClockReport {
+    pub mean_radius: f64,
+    pub radius_std: f64,
+    pub angular_coverage: f64,
+    pub mean_angle_error: f64,
+    pub order_fraction: f64,
+}
+
+pub fn project_embeddings_to_fourier_plane(
+    embeddings: &[Vec<f64>],
+    modulus: usize,
+) -> Result<Vec<(f64, f64)>, String> {
+    let p = modulus;
+    if embeddings.len() < p {
+        return Err("embedding matrix smaller than modulus".to_string());
+    }
+    if p == 0 {
+        return Err("modulus must be positive".to_string());
+    }
+    let d = embeddings[0].len();
+    if d == 0 {
+        return Err("embedding dimension must be positive".to_string());
+    }
+    if !embeddings[..p].iter().all(|row| row.len() == d) {
+        return Err("embedding rows have inconsistent dimension".to_string());
+    }
+
+    let tau = std::f64::consts::PI * 2.0;
+    let mut basis_cos = vec![0.0f64; d];
+    let mut basis_sin = vec![0.0f64; d];
+    let scale = 2.0 / p as f64;
+
+    for (token, embedding) in embeddings[..p].iter().enumerate() {
+        let angle = tau * token as f64 / p as f64;
+        let cos_val = angle.cos();
+        let sin_val = angle.sin();
+        for dim in 0..d {
+            basis_cos[dim] += cos_val * embedding[dim] * scale;
+            basis_sin[dim] += sin_val * embedding[dim] * scale;
+        }
+    }
+
+    let basis_cos = normalize_vector(&basis_cos)?;
+    let basis_sin = normalize_vector(&basis_sin)?;
+
+    let mut coords = Vec::with_capacity(p);
+    for embedding in embeddings[..p].iter() {
+        let x = dot(embedding, &basis_cos);
+        let y = dot(embedding, &basis_sin);
+        coords.push((x, y));
+    }
+
+    Ok(coords)
+}
+
+pub fn verify_embedding_clock_geometry(
+    embeddings: &[Vec<f64>],
+    modulus: usize,
+    config: &EmbeddingClockConfig,
+) -> Result<EmbeddingClockReport, String> {
+    let coords = project_embeddings_to_fourier_plane(embeddings, modulus)?;
+    let p = coords.len();
+    if p == 0 {
+        return Err("no embedding coordinates computed".to_string());
+    }
+
+    let mut radii = Vec::with_capacity(p);
+    let mut angles = Vec::with_capacity(p);
+    for (x, y) in &coords {
+        let radius = (x * x + y * y).sqrt();
+        radii.push(radius);
+        angles.push(y.atan2(*x));
+    }
+
+    let mean_radius = radii.iter().sum::<f64>() / p as f64;
+    if mean_radius == 0.0 {
+        return Err("mean radius is zero".to_string());
+    }
+    let radius_var = radii
+        .iter()
+        .map(|r| (r - mean_radius) * (r - mean_radius))
+        .sum::<f64>()
+        / p as f64;
+    let radius_std = radius_var.sqrt();
+
+    if radius_std / mean_radius > config.max_radius_std_fraction {
+        return Err(format!(
+            "radius variance too large (std {:.4}, mean {:.4})",
+            radius_std, mean_radius
+        ));
+    }
+
+    let tau = std::f64::consts::PI * 2.0;
+    let (mut sum_cos, mut sum_sin) = (0.0f64, 0.0f64);
+    for (token, angle) in angles.iter().enumerate() {
+        let expected = tau * token as f64 / p as f64;
+        let delta = angle - expected;
+        sum_cos += delta.cos();
+        sum_sin += delta.sin();
+    }
+    let offset = sum_sin.atan2(sum_cos);
+
+    let mut adjusted_angles = Vec::with_capacity(p);
+    let mut angle_errors = Vec::with_capacity(p);
+    for (token, angle) in angles.iter().enumerate() {
+        let expected = tau * token as f64 / p as f64;
+        let mut adjusted = angle - offset;
+        adjusted = wrap_angle(adjusted);
+        adjusted_angles.push(adjusted);
+        let diff = wrap_angle_signed(adjusted - expected);
+        angle_errors.push(diff.abs());
+    }
+
+    let mean_angle_error = angle_errors.iter().sum::<f64>() / p as f64;
+    if mean_angle_error > config.max_mean_angle_error {
+        return Err(format!(
+            "mean angular error too large ({:.4} rad)",
+            mean_angle_error
+        ));
+    }
+
+    let angular_coverage = angular_coverage(&adjusted_angles);
+    if angular_coverage < config.min_angular_coverage {
+        return Err(format!(
+            "angular coverage too small ({:.4})",
+            angular_coverage
+        ));
+    }
+
+    let order_fraction = order_fraction(&adjusted_angles, p);
+    if order_fraction < config.min_order_fraction {
+        return Err(format!(
+            "token ordering too weak ({:.4})",
+            order_fraction
+        ));
+    }
+
+    Ok(EmbeddingClockReport {
+        mean_radius,
+        radius_std,
+        angular_coverage,
+        mean_angle_error,
+        order_fraction,
+    })
+}
+
+fn normalize_vector(vec: &[f64]) -> Result<Vec<f64>, String> {
+    let norm = vec.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if norm == 0.0 {
+        return Err("basis vector norm is zero".to_string());
+    }
+    Ok(vec.iter().map(|v| v / norm).collect())
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+fn wrap_angle(angle: f64) -> f64 {
+    let tau = std::f64::consts::PI * 2.0;
+    let mut wrapped = angle % tau;
+    if wrapped < 0.0 {
+        wrapped += tau;
+    }
+    wrapped
+}
+
+fn wrap_angle_signed(angle: f64) -> f64 {
+    let tau = std::f64::consts::PI * 2.0;
+    let mut wrapped = (angle + std::f64::consts::PI) % tau;
+    if wrapped < 0.0 {
+        wrapped += tau;
+    }
+    wrapped - std::f64::consts::PI
+}
+
+fn angular_coverage(angles: &[f64]) -> f64 {
+    if angles.is_empty() {
+        return 0.0;
+    }
+    let tau = std::f64::consts::PI * 2.0;
+    let mut sorted = angles.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut max_gap = 0.0;
+    for pair in sorted.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap > max_gap {
+            max_gap = gap;
+        }
+    }
+    let wrap_gap = tau - (sorted[sorted.len() - 1] - sorted[0]);
+    if wrap_gap > max_gap {
+        max_gap = wrap_gap;
+    }
+
+    (tau - max_gap) / tau
+}
+
+fn order_fraction(angles: &[f64], modulus: usize) -> f64 {
+    if angles.len() < 2 || modulus == 0 {
+        return 0.0;
+    }
+    let mut indexed: Vec<(usize, f64)> = angles.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut good = 0usize;
+    for window in indexed.windows(2) {
+        let current = window[0].0;
+        let next = window[1].0;
+        if (next + modulus - current) % modulus == 1 {
+            good += 1;
+        }
+    }
+    let last = indexed[indexed.len() - 1].0;
+    let first = indexed[0].0;
+    if (first + modulus - last) % modulus == 1 {
+        good += 1;
+    }
+
+    good as f64 / modulus as f64
+}
+
 /// Track training and validation accuracy over time
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AccuracyHistory {
@@ -387,6 +774,16 @@ impl AccuracyHistory {
 mod tests {
     use super::*;
 
+    fn make_circle_embeddings(modulus: usize) -> Vec<Vec<f64>> {
+        let tau = std::f64::consts::PI * 2.0;
+        (0..modulus)
+            .map(|token| {
+                let angle = tau * token as f64 / modulus as f64;
+                vec![angle.cos(), angle.sin(), 0.0, 0.0]
+            })
+            .collect()
+    }
+
     #[test]
     fn top_k_frequency_indices_stable_with_ties() {
         let magnitudes = vec![0.1, 1.0, 1.0, 0.5];
@@ -401,5 +798,52 @@ mod tests {
         let signal = vec![1.0, -1.0, 0.5, -0.5];
         let filtered = restrict_signal_to_top_k_frequencies(&signal, 0);
         assert_eq!(filtered, vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn exclude_signal_no_change_when_top_k_zero() {
+        let signal = vec![1.0, -1.0, 0.5, -0.5];
+        let filtered = exclude_top_k_frequencies(&signal, 0);
+        assert_eq!(filtered, signal);
+    }
+
+    #[test]
+    fn exclude_signal_zeroes_when_top_k_all() {
+        let signal = vec![1.0, -1.0, 0.5, -0.5];
+        let filtered = exclude_top_k_frequencies(&signal, signal.len());
+        assert_eq!(filtered, vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn embedding_clock_geometry_passes_on_clean_circle() {
+        let modulus = 13;
+        let embeddings = make_circle_embeddings(modulus);
+        let config = EmbeddingClockConfig::default_for_modulus(modulus);
+        let report =
+            verify_embedding_clock_geometry(&embeddings, modulus, &config).expect("expected pass");
+        assert!(report.angular_coverage > 0.9);
+        assert!(report.order_fraction > 0.9);
+        assert!(report.mean_angle_error < 0.1);
+    }
+
+    #[test]
+    fn embedding_clock_geometry_flags_wrong_frequency() {
+        let modulus = 11;
+        let tau = std::f64::consts::PI * 2.0;
+        let embeddings: Vec<Vec<f64>> = (0..modulus)
+            .map(|token| {
+                let angle = tau * token as f64 / modulus as f64;
+                vec![(2.0 * angle).cos(), (2.0 * angle).sin(), 0.0, 0.0]
+            })
+            .collect();
+        let config = EmbeddingClockConfig {
+            max_radius_std_fraction: 0.5,
+            min_angular_coverage: 0.1,
+            max_mean_angle_error: 0.2,
+            min_order_fraction: 0.1,
+        };
+        let err = verify_embedding_clock_geometry(&embeddings, modulus, &config)
+            .expect_err("expected ordering verification to fail");
+        assert!(err.contains("mean angular error"));
     }
 }

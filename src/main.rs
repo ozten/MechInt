@@ -138,7 +138,8 @@ fn main() {
         }
     }
 
-    if let Some(epoch) = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0) {
+    let grokking_epoch = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0);
+    if let Some(epoch) = grokking_epoch {
         if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
             eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
         }
@@ -208,6 +209,117 @@ fn main() {
     let accuracy_history_path = format!("{artifact_dir}/accuracy_history.json");
     if let Err(e) = accuracy_history.save(&accuracy_history_path) {
         eprintln!("⚠️  Warning: Could not save accuracy history: {}", e);
+    }
+
+    let excluded_top_k = 5usize;
+    let excluded_batch_size = training_config.batch_size;
+    let mut excluded_history = analysis::ExcludedLossHistory::new();
+
+    let initial_model: Transformer<MyAutodiffBackend> = TransformerConfig::default().init(&device);
+    match analysis::compute_excluded_loss(
+        &initial_model,
+        &train_dataset,
+        &device,
+        excluded_top_k,
+        excluded_batch_size,
+    ) {
+        Ok(loss) => {
+            excluded_history.add_snapshot(0, loss);
+            println!("🔎 Excluded loss (initial, top_k={}): {:.4}", excluded_top_k, loss);
+        }
+        Err(err) => {
+            eprintln!("⚠️  Warning: Could not compute excluded loss (initial): {}", err);
+        }
+    }
+
+    if let Some(epoch) = grokking_epoch {
+        let grokking_step = (epoch - 1) * steps_per_epoch;
+        let grokking_path = format!("{artifact_dir}/checkpoint_labeled/model-grokking.mpk");
+        if Path::new(&grokking_path).exists() {
+            match checkpoint::load_checkpoint::<MyAutodiffBackend>(&grokking_path, &device) {
+                Ok(grokking_model) => {
+                    match analysis::compute_excluded_loss(
+                        &grokking_model,
+                        &train_dataset,
+                        &device,
+                        excluded_top_k,
+                        excluded_batch_size,
+                    ) {
+                        Ok(loss) => {
+                            excluded_history.add_snapshot(grokking_step, loss);
+                            println!(
+                                "🔎 Excluded loss (grokking, step {}, top_k={}): {:.4}",
+                                grokking_step, excluded_top_k, loss
+                            );
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "⚠️  Warning: Could not compute excluded loss (grokking): {}",
+                                err
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "⚠️  Warning: Could not load grokking checkpoint for excluded loss: {}",
+                        err
+                    );
+                }
+            }
+        } else {
+            eprintln!(
+                "⚠️  Warning: Grokking checkpoint not found at {}",
+                grokking_path
+            );
+        }
+    }
+
+    match analysis::compute_excluded_loss(
+        &model,
+        &train_dataset,
+        &device,
+        excluded_top_k,
+        excluded_batch_size,
+    ) {
+        Ok(loss) => {
+            excluded_history.add_snapshot(total_steps, loss);
+            println!(
+                "🔎 Excluded loss (final, step {}, top_k={}): {:.4}",
+                total_steps, excluded_top_k, loss
+            );
+        }
+        Err(err) => {
+            eprintln!("⚠️  Warning: Could not compute excluded loss (final): {}", err);
+        }
+    }
+
+    if !excluded_history.snapshots.is_empty() {
+        let excluded_history_path = format!("{artifact_dir}/excluded_loss_history.json");
+        if let Err(e) = excluded_history.save(&excluded_history_path) {
+            eprintln!("⚠️  Warning: Could not save excluded loss history: {}", e);
+        }
+
+        if excluded_history.snapshots.len() >= 3 {
+            let spike_config = verify::ExcludedLossSpikeConfig {
+                min_relative_increase: 0.5,
+            };
+            match verify::verify_excluded_loss_spike(&excluded_history.snapshots, &spike_config) {
+                Ok(report) => {
+                    println!(
+                        "✅ Excluded loss spike detected at step {} (baseline {:.4}, peak {:.4})",
+                        report.spike_step, report.baseline_loss, report.spike_loss
+                    );
+                }
+                Err(err) => {
+                    eprintln!("⚠️  Warning: Excluded loss spike verification failed: {}", err);
+                }
+            }
+        } else {
+            eprintln!(
+                "⚠️  Warning: Excluded loss spike verification skipped (need >=3 points)"
+            );
+        }
     }
 
     // Generate plots

@@ -58,6 +58,18 @@ pub struct RestrictedLossReport {
     pub full_drop_step: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExcludedLossSpikeConfig {
+    pub min_relative_increase: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExcludedLossSpikeReport {
+    pub spike_step: usize,
+    pub spike_loss: f64,
+    pub baseline_loss: f64,
+}
+
 pub fn verify_grokking_phase_transition(
     loss_history: &LossHistory,
     accuracy_history: &AccuracyHistory,
@@ -193,6 +205,48 @@ pub fn verify_restricted_loss_early_drop(
     Ok(RestrictedLossReport {
         restricted_drop_step,
         full_drop_step,
+    })
+}
+
+pub fn verify_excluded_loss_spike(
+    excluded_losses: &[(usize, f64)],
+    config: &ExcludedLossSpikeConfig,
+) -> Result<ExcludedLossSpikeReport, String> {
+    if excluded_losses.len() < 3 {
+        return Err("excluded loss history requires at least 3 points".to_string());
+    }
+
+    let first = excluded_losses.first().ok_or_else(|| {
+        "excluded loss history is empty".to_string()
+    })?;
+    let last = excluded_losses.last().ok_or_else(|| {
+        "excluded loss history is empty".to_string()
+    })?;
+    let baseline_loss = (first.1 + last.1) / 2.0;
+
+    let (peak_idx, (peak_step, peak_loss)) = excluded_losses
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .ok_or_else(|| "excluded loss history is empty".to_string())?;
+
+    if peak_idx == 0 || peak_idx + 1 == excluded_losses.len() {
+        return Err("excluded loss spike occurs at boundary".to_string());
+    }
+
+    if peak_loss < &(baseline_loss * (1.0 + config.min_relative_increase)) {
+        return Err(format!(
+            "excluded loss spike too small (baseline {:.4}, peak {:.4})",
+            baseline_loss, peak_loss
+        ));
+    }
+
+    Ok(ExcludedLossSpikeReport {
+        spike_step: *peak_step,
+        spike_loss: *peak_loss,
+        baseline_loss,
     })
 }
 
@@ -451,5 +505,29 @@ mod tests {
         let err = verify_restricted_loss_early_drop(&full_loss, &restricted_loss, &config)
             .expect_err("expected restricted loss verification to fail");
         assert!(err.contains("restricted loss drops"));
+    }
+
+    #[test]
+    fn excluded_loss_spike_verification_passes() {
+        let excluded_loss = vec![(0, 1.0), (1500, 2.2), (3000, 1.1)];
+        let config = ExcludedLossSpikeConfig {
+            min_relative_increase: 0.5,
+        };
+
+        let report = verify_excluded_loss_spike(&excluded_loss, &config)
+            .expect("expected excluded loss spike verification to pass");
+        assert_eq!(report.spike_step, 1500);
+    }
+
+    #[test]
+    fn excluded_loss_spike_verification_fails_without_spike() {
+        let excluded_loss = vec![(0, 1.0), (1500, 1.1), (3000, 1.0)];
+        let config = ExcludedLossSpikeConfig {
+            min_relative_increase: 0.5,
+        };
+
+        let err = verify_excluded_loss_spike(&excluded_loss, &config)
+            .expect_err("expected excluded loss spike verification to fail");
+        assert!(err.contains("excluded loss spike too small"));
     }
 }
