@@ -170,6 +170,35 @@ pub struct DiagonalRidgeReport {
     pub ratio: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SnakeCurveConfig {
+    pub early_step_max: usize,
+    pub train_convergence_threshold: f32,
+    pub val_plateau_min_step: usize,
+    pub val_plateau_max_acc: f32,
+    pub val_final_threshold: f32,
+}
+
+impl SnakeCurveConfig {
+    pub fn default_for_modulus(modulus: usize) -> Self {
+        Self {
+            early_step_max: 1000,
+            train_convergence_threshold: 0.95,
+            val_plateau_min_step: 1000,
+            val_plateau_max_acc: 1.0 / modulus as f32 + 0.05,
+            val_final_threshold: 0.90,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SnakeCurveReport {
+    pub train_converged_by_step: usize,
+    pub val_plateau_max_acc: f32,
+    pub val_grok_step: usize,
+    pub curve_shape_valid: bool,
+}
+
 pub fn verify_grokking_phase_transition(
     loss_history: &LossHistory,
     accuracy_history: &AccuracyHistory,
@@ -1165,6 +1194,91 @@ fn test_all_examples<B: Backend>(
     total_correct as f32 / total as f32
 }
 
+/// Verify the characteristic "snake curve" shape of grokking phenomenon
+/// on log-scale plots: train accuracy rises early, validation stays flat then jumps
+pub fn verify_snake_curve_shape(
+    train_acc: &[(usize, f32)],
+    val_acc: &[(usize, f32)],
+    config: &SnakeCurveConfig,
+) -> Result<SnakeCurveReport, String> {
+    if train_acc.is_empty() || val_acc.is_empty() {
+        return Err("empty accuracy history".to_string());
+    }
+
+    // Phase 1: Verify early train convergence (immediate drop on log scale)
+    let train_converged_step = train_acc
+        .iter()
+        .find(|(_, acc)| *acc >= config.train_convergence_threshold)
+        .map(|(step, _)| *step)
+        .ok_or_else(|| {
+            format!(
+                "train accuracy never reaches {} threshold",
+                config.train_convergence_threshold
+            )
+        })?;
+
+    if train_converged_step > config.early_step_max {
+        return Err(format!(
+            "train accuracy converges at step {}, expected before {}",
+            train_converged_step, config.early_step_max
+        ));
+    }
+
+    // Phase 2: Verify validation plateau (flat on log scale)
+    let plateau_samples: Vec<f32> = val_acc
+        .iter()
+        .filter(|(step, _)| *step >= 1 && *step <= config.val_plateau_min_step)
+        .map(|(_, acc)| *acc)
+        .collect();
+
+    if plateau_samples.is_empty() {
+        return Err("no validation samples in plateau region".to_string());
+    }
+
+    let val_plateau_max = plateau_samples
+        .iter()
+        .fold(0.0f32, |max_val, &acc| max_val.max(acc));
+
+    if val_plateau_max > config.val_plateau_max_acc {
+        return Err(format!(
+            "validation accuracy in plateau region too high: max {:.4} exceeds {:.4}",
+            val_plateau_max, config.val_plateau_max_acc
+        ));
+    }
+
+    // Phase 3: Verify delayed validation jump (crash up on log scale)
+    let val_grok_step = val_acc
+        .iter()
+        .filter(|(step, _)| *step > config.val_plateau_min_step)
+        .find(|(_, acc)| *acc >= config.val_final_threshold)
+        .map(|(step, _)| *step)
+        .ok_or_else(|| {
+            format!(
+                "validation accuracy never reaches {} after plateau",
+                config.val_final_threshold
+            )
+        })?;
+
+    // Phase 4: Verify phase ordering (snake shape: early train, late val)
+    let curve_shape_valid = train_converged_step < config.val_plateau_min_step
+        && val_grok_step > config.val_plateau_min_step
+        && train_converged_step < val_grok_step;
+
+    if !curve_shape_valid {
+        return Err(format!(
+            "invalid curve shape: train converged at {}, val plateau until {}, val grokked at {}",
+            train_converged_step, config.val_plateau_min_step, val_grok_step
+        ));
+    }
+
+    Ok(SnakeCurveReport {
+        train_converged_by_step: train_converged_step,
+        val_plateau_max_acc: val_plateau_max,
+        val_grok_step,
+        curve_shape_valid,
+    })
+}
+
 /// Test specific examples to see if model actually computes mod p
 pub fn test_specific_examples<B: Backend>(
     model: &Transformer<B>,
@@ -1618,5 +1732,156 @@ mod tests {
         let err = verify_constructive_interference_surface_from_grid(&surface, &config)
             .expect_err("expected random noise to fail diagonal verification");
         assert!(err.contains("diagonal/axis ratio") || err.contains("diagonal autocorrelation"));
+    }
+
+    #[test]
+    fn snake_curve_verification_passes_on_valid_grokking_curve() {
+        // Simulate typical grokking: train converges early, val plateaus then jumps
+        let train_acc = vec![
+            (1, 0.10),
+            (10, 0.50),
+            (100, 0.80),
+            (500, 0.98),
+            (1000, 0.99),
+            (2000, 0.995),
+        ];
+        let val_acc = vec![
+            (1, 0.01),
+            (10, 0.009),
+            (100, 0.01),
+            (500, 0.011),
+            (1000, 0.009),
+            (1500, 0.01),
+            (2000, 0.92),
+            (3000, 0.98),
+        ];
+
+        let config = SnakeCurveConfig {
+            early_step_max: 1000,
+            train_convergence_threshold: 0.95,
+            val_plateau_min_step: 1500,
+            val_plateau_max_acc: 0.05,
+            val_final_threshold: 0.90,
+        };
+
+        let report = verify_snake_curve_shape(&train_acc, &val_acc, &config)
+            .expect("expected snake curve verification to pass");
+
+        assert_eq!(report.train_converged_by_step, 500);
+        assert!(report.val_plateau_max_acc < config.val_plateau_max_acc);
+        assert_eq!(report.val_grok_step, 2000);
+        assert!(report.curve_shape_valid);
+    }
+
+    #[test]
+    fn snake_curve_verification_fails_on_simultaneous_convergence() {
+        // Both train and val converge at the same time (no grokking)
+        let train_acc = vec![
+            (1, 0.10),
+            (100, 0.98),
+            (500, 0.99),
+        ];
+        let val_acc = vec![
+            (1, 0.10),
+            (100, 0.97),
+            (500, 0.98),
+        ];
+
+        let config = SnakeCurveConfig {
+            early_step_max: 1000,
+            train_convergence_threshold: 0.95,
+            val_plateau_min_step: 200,
+            val_plateau_max_acc: 0.05,
+            val_final_threshold: 0.90,
+        };
+
+        let err = verify_snake_curve_shape(&train_acc, &val_acc, &config)
+            .expect_err("expected snake curve verification to fail");
+        assert!(err.contains("plateau region too high"));
+    }
+
+    #[test]
+    fn snake_curve_verification_fails_on_slow_train_convergence() {
+        // Train takes too long to converge (not the typical snake curve)
+        let train_acc = vec![
+            (1, 0.10),
+            (500, 0.50),
+            (1000, 0.70),
+            (2000, 0.98),
+        ];
+        let val_acc = vec![
+            (1, 0.01),
+            (500, 0.01),
+            (1000, 0.01),
+            (2000, 0.92),
+        ];
+
+        let config = SnakeCurveConfig {
+            early_step_max: 1000,
+            train_convergence_threshold: 0.95,
+            val_plateau_min_step: 1500,
+            val_plateau_max_acc: 0.05,
+            val_final_threshold: 0.90,
+        };
+
+        let err = verify_snake_curve_shape(&train_acc, &val_acc, &config)
+            .expect_err("expected snake curve verification to fail");
+        assert!(err.contains("converges at step 2000"));
+    }
+
+    #[test]
+    fn snake_curve_verification_fails_without_val_jump() {
+        // Validation never jumps up (no generalization)
+        let train_acc = vec![
+            (1, 0.10),
+            (100, 0.98),
+            (500, 0.99),
+        ];
+        let val_acc = vec![
+            (1, 0.01),
+            (100, 0.01),
+            (500, 0.01),
+            (2000, 0.02),
+        ];
+
+        let config = SnakeCurveConfig {
+            early_step_max: 1000,
+            train_convergence_threshold: 0.95,
+            val_plateau_min_step: 200,
+            val_plateau_max_acc: 0.05,
+            val_final_threshold: 0.90,
+        };
+
+        let err = verify_snake_curve_shape(&train_acc, &val_acc, &config)
+            .expect_err("expected snake curve verification to fail");
+        assert!(err.contains("validation accuracy never reaches"));
+    }
+
+    #[test]
+    fn snake_curve_verification_fails_on_wrong_phase_ordering() {
+        // Val jumps before train converges (backwards snake)
+        let train_acc = vec![
+            (1, 0.10),
+            (500, 0.50),
+            (2000, 0.98),
+        ];
+        let val_acc = vec![
+            (1, 0.01),
+            (100, 0.95),
+            (500, 0.98),
+        ];
+
+        let config = SnakeCurveConfig {
+            early_step_max: 1000,
+            train_convergence_threshold: 0.95,
+            val_plateau_min_step: 200,
+            val_plateau_max_acc: 0.05,
+            val_final_threshold: 0.90,
+        };
+
+        let result = verify_snake_curve_shape(&train_acc, &val_acc, &config);
+        // Should fail because val jumps before train converges (not a proper snake curve)
+        // This can fail for multiple reasons, but should definitely fail
+        assert!(result.is_err(), "Expected snake curve verification to fail but it passed");
     }
 }

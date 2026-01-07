@@ -1060,3 +1060,51 @@ fn render_scatter_plot(
         draw_filled_circle_mut(img, (x as i32, y as i32), 2, color);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logscale_plotting_functions_exist() {
+        // Verify that log-scale plotting functions exist and have the correct signature
+        // This is a compile-time check that ensures the API is correct
+        let _: fn(&[(usize, f64)], &[(usize, f64)], &str) -> Result<(), Box<dyn std::error::Error>> =
+            plot_loss_history_dual_logscale;
+        let _: fn(&[(usize, f32)], &[(usize, f32)], &str) -> Result<(), Box<dyn std::error::Error>> =
+            plot_accuracy_history_logscale;
+        let _: fn(&[(usize, f64)], &[(usize, f64)], &[(usize, f32)], &[(usize, f32)], &str) -> Result<(), Box<dyn std::error::Error>> =
+            plot_grokking_combined_logscale;
+    }
+
+    #[test]
+    fn snake_curve_can_be_verified_with_plotting_data() {
+        use crate::verify::{verify_snake_curve_shape, SnakeCurveConfig};
+
+        // Simulate grokking data that would produce a snake curve on log-scale plot
+        let train_acc = vec![
+            (1, 0.10),
+            (10, 0.50),
+            (100, 0.90),
+            (500, 0.99),
+            (1000, 0.995),
+        ];
+        let val_acc = vec![
+            (1, 0.01),
+            (10, 0.01),
+            (100, 0.01),
+            (500, 0.01),
+            (1000, 0.01),
+            (2000, 0.95),
+        ];
+
+        let config = SnakeCurveConfig::default_for_modulus(113);
+        let report = verify_snake_curve_shape(&train_acc, &val_acc, &config)
+            .expect("snake curve verification should pass on grokking data");
+
+        // Verify the snake curve characteristics are present
+        assert!(report.train_converged_by_step < 1000, "train should converge early");
+        assert!(report.val_grok_step > 1000, "val should grok late");
+        assert!(report.curve_shape_valid, "curve shape should be valid");
+    }
+}
