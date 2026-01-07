@@ -1,0 +1,10 @@
+.venv/
+target/
+*~
+\#*\#
+.\#*
+codex-iter*
+.gitattributes
+.beads/bd.sock.startlock
+last-iteration-output.txt
+.git-writable/

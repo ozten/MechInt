@@ -7,6 +7,9 @@ use burn::{
     },
     tensor::{backend::Backend, Int, Tensor},
 };
+use burn::tensor::module::embedding;
+
+use crate::data::ModularAdditionDataset;
 
 #[derive(Config, Debug)]
 pub struct TransformerConfig {
@@ -21,8 +24,8 @@ pub struct TransformerConfig {
 impl Default for TransformerConfig {
     fn default() -> Self {
         Self {
-            vocab_size: 98,       // 0-96 for numbers, 97 for '='
-            seq_length: 3,        // [a, b, =]
+            vocab_size: ModularAdditionDataset::vocab_size(),
+            seq_length: ModularAdditionDataset::sequence_length(),
             d_model: 128,         // embedding dimension
             n_heads: 4,           // attention heads
             d_ff: 512,            // MLP hidden dimension
@@ -110,6 +113,10 @@ impl<B: Backend> Transformer<B> {
         embedding.squeeze::<2>() // Remove seq dimension -> [1, embedding_dim]
     }
 
+    pub fn token_embedding_weights(&self) -> Tensor<B, 2> {
+        self.token_embedding.weight.val()
+    }
+
     /// Forward pass
     /// Input: [batch_size, seq_length] of token indices
     /// Output: [batch_size, vocab_size] logits for next token prediction
@@ -139,6 +146,43 @@ impl<B: Backend> Transformer<B> {
 
         // Take the last position (after '=') for prediction
         let last_hidden = hidden.slice([0..batch_size, (seq_length - 1)..seq_length])
+            .squeeze();
+
+        // Project to vocabulary
+        self.lm_head.forward(last_hidden)
+    }
+
+    pub fn forward_with_token_weights(
+        &self,
+        x: Tensor<B, 2, Int>,
+        token_weights: Tensor<B, 2>,
+    ) -> Tensor<B, 2> {
+        let [batch_size, seq_length] = x.dims();
+        let device = x.device();
+
+        // Token embeddings: [batch_size, seq_length, d_model]
+        let tok_emb = embedding(token_weights, x);
+
+        // Position embeddings: [batch_size, seq_length, d_model]
+        let positions = Tensor::arange(0..seq_length as i64, &device)
+            .reshape([1, seq_length])
+            .repeat(&[batch_size, 1]);
+        let pos_emb = self.position_embedding.forward(positions);
+
+        // Add token and position embeddings
+        let mut hidden = tok_emb + pos_emb;
+
+        // Apply transformer layers
+        for layer in &self.layers {
+            hidden = layer.forward(hidden);
+        }
+
+        // Final layer norm
+        hidden = self.ln_f.forward(hidden);
+
+        // Take the last position (after '=') for prediction
+        let last_hidden = hidden
+            .slice([0..batch_size, (seq_length - 1)..seq_length])
             .squeeze();
 
         // Project to vocabulary
@@ -221,9 +265,9 @@ mod tests {
         let batch_size = 4;
         let seq_length = 3;
 
-        // Dummy input: [[0, 1, 97], [2, 3, 97], ...]
+        // Dummy input: [[0, 1, 113], [2, 3, 113], ...]
         let input = Tensor::<TestBackend, 2, Int>::from_data(
-            [[0, 1, 97], [2, 3, 97], [5, 10, 97], [20, 30, 97]],
+            [[0, 1, 113], [2, 3, 113], [5, 10, 113], [20, 30, 113]],
             &device,
         );
 
@@ -231,6 +275,6 @@ mod tests {
         let logits = model.forward(input);
 
         // Check output shape: [batch_size, vocab_size]
-        assert_eq!(logits.dims(), [batch_size, 98]);
+        assert_eq!(logits.dims(), [batch_size, ModularAdditionDataset::vocab_size()]);
     }
 }

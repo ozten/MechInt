@@ -50,7 +50,7 @@ fn main() {
 
         // Run inference (no gradients needed)
         let logits = model.clone().valid().forward(input.inner());
-        let prediction = logits.argmax(1).squeeze::<1>(1);
+        let prediction = logits.argmax(1).squeeze::<1>();
         let predicted: i32 = prediction.into_data().to_vec().unwrap()[0];
 
         let status = if predicted == expected as i32 { "✓" } else { "✗" };

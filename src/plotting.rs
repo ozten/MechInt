@@ -1,7 +1,9 @@
-use plotters::prelude::*;
-use std::collections::HashMap;
 use image::{ImageBuffer, Rgb, RgbImage};
 use imageproc::drawing::{draw_filled_circle_mut, draw_line_segment_mut};
+use plotters::prelude::*;
+use std::collections::HashMap;
+
+use crate::data::ModularAdditionDataset;
 
 /// Viridis colormap - maps value in [0, 1] to RGB
 fn viridis_color(t: f64) -> RGBColor {
@@ -78,8 +80,8 @@ pub fn plot_loss_history_dual(
         .label("Val Loss")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &GREEN));
 
-    // Compute chance level loss: -log(1/97) ≈ 4.57
-    let chance_loss = -(1.0 / 97.0_f64).ln();
+    let modulus = ModularAdditionDataset::modulus() as f64;
+    let chance_loss = -(1.0 / modulus).ln();
     chart
         .draw_series(LineSeries::new(
             vec![(0, chance_loss), (max_step, chance_loss)],
@@ -244,8 +246,8 @@ pub fn plot_fft_frequency_distribution(
         freq_vec
             .iter()
             .map(|(freq, count)| {
-                let color = if *freq == 97 {
-                    RED.filled() // Highlight frequency 97 (the modulus)
+                let color = if *freq == ModularAdditionDataset::modulus() {
+                    RED.filled() // Highlight frequency matching modulus
                 } else {
                     BLUE.filled()
                 };
@@ -426,7 +428,8 @@ pub fn plot_grokking_combined(
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &GREEN));
 
         // Chance level
-        let chance_loss = -(1.0 / 97.0_f64).ln();
+        let modulus = ModularAdditionDataset::modulus() as f64;
+        let chance_loss = -(1.0 / modulus).ln();
         chart.draw_series(LineSeries::new(
             vec![(0, chance_loss), (max_step, chance_loss)],
             &BLUE.mix(0.5),
@@ -498,8 +501,8 @@ pub fn plot_loss_history_dual_logscale(
         .label("Val Loss")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &GREEN));
 
-    // Compute chance level loss: -log(1/97) ≈ 4.57
-    let chance_loss = -(1.0 / 97.0_f64).ln();
+    let modulus = ModularAdditionDataset::modulus() as f64;
+    let chance_loss = -(1.0 / modulus).ln();
     chart
         .draw_series(LineSeries::new(
             vec![(1.0, chance_loss), (max_step as f64, chance_loss)],
@@ -695,7 +698,8 @@ pub fn plot_grokking_combined_logscale(
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &GREEN));
 
         // Chance level
-        let chance_loss = -(1.0 / 97.0_f64).ln();
+        let modulus = ModularAdditionDataset::modulus() as f64;
+        let chance_loss = -(1.0 / modulus).ln();
         chart.draw_series(LineSeries::new(
             vec![(1.0, chance_loss), (max_step as f64, chance_loss)],
             &BLUE.mix(0.5),
@@ -714,7 +718,7 @@ pub fn plot_grokking_combined_logscale(
 }
 
 /// Plot 3×3 embedding analysis grid (faster version)
-/// embeddings: [p, d] matrix where p=97 (number of tokens), d=embedding_dim
+/// embeddings: [p, d] matrix where p is the number of tokens, d=embedding_dim
 /// dimensions: indices of 3 embedding dimensions to visualize
 pub fn plot_embedding_grid_3x3(
     embeddings: &[Vec<f64>],
