@@ -21,26 +21,11 @@ while [ $iteration -lt $MAX_ITERATIONS ]; do
     fi
     
     echo "Open tasks: $OPEN_TASKS"
-
-    JSONL_FILE="./codex-iteration-$iteration.jsonl"
     
-    # Run Codex with the prompt
-    codex exec \
-        -C /Users/admin/MechInt -c 'network_access="enabled"' \
-        --sandbox danger-full-access \
-        --json \
-        -o ./last-iteration-output.txt \
-        "$(cat $PROMPT_FILE)" 2>&1 | tee ./codex-iteration-$iteration.jsonl
+    # Run Claude with the prompt
+    claude -p "$(cat $PROMPT_FILE)" --dangerously-skip-permissions    
     
     EXIT_CODE=$?
-
-    # Check for rate limiting or usage limits in JSONL output
-    if grep -qiE '429|too.?many.?requests|usage_limit_reached|rate.?limit' "$JSONL_FILE"; then
-        echo ""
-        echo "⛔ Rate limit or usage limit detected. Exiting loop."
-        echo "   Check $JSONL_FILE for details."
-        exit 1
-    fi
     
     if [ $EXIT_CODE -ne 0 ]; then
         echo "Codex exited with error code $EXIT_CODE"
