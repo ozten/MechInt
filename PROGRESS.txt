@@ -19,3 +19,8 @@
 - Matched transformer defaults to the 1-layer spec and removed LayerNorm usage
 - Added causal-mask wiring plus unit tests for config, embeddings, biases, activation, and masking
 - Suggestions: update training/spec docs if any remaining references assume 2 layers
+
+## [2026-01-07 22:16:47] Completed MechInt-abt
+- Added MLP post-ReLU activation capture and rectified-sine verification via FFT/correlation metrics
+- Added synthetic verification tests for rectified sine pass and noise failure cases
+- Suggestions: wire MLP activation verification into training analysis runs post-grok
