@@ -3,7 +3,7 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::model::Transformer;
+use crate::{data::ModularAdditionDataset, model::Transformer};
 
 /// FFT analysis results for embeddings
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,7 +18,7 @@ pub struct FFTAnalysis {
 pub fn analyze_embeddings_fft<B: Backend>(model: &Transformer<B>) -> FFTAnalysis {
     println!("🔍 Performing FFT analysis on learned embeddings...");
 
-    let vocab_size = 98; // 0-96 for numbers, 97 for '='
+    let vocab_size = ModularAdditionDataset::vocab_size();
     let embedding_dim = 128;
 
     // Extract token embeddings by forward passing through the embedding layer
@@ -62,11 +62,15 @@ pub fn analyze_embeddings_fft<B: Backend>(model: &Transformer<B>) -> FFTAnalysis
         println!("    Frequency {}: {} tokens", freq, count);
     }
 
-    // Check for modular structure (expected for mod 97)
+    // Check for modular structure (expected for mod p)
     println!();
     println!("🔬 Checking for modular structure:");
-    if freq_histogram.contains_key(&97) {
-        println!("  ✓ Frequency 97 (matching modulus) appears in embeddings");
+    let modulus = ModularAdditionDataset::modulus();
+    if freq_histogram.contains_key(&modulus) {
+        println!(
+            "  ✓ Frequency {} (matching modulus) appears in embeddings",
+            modulus
+        );
     }
 
     FFTAnalysis {
@@ -203,7 +207,7 @@ pub fn compute_model_weight_norm<B: Backend>(_model: &Transformer<B>) -> f64 {
 
 /// Extract all token embeddings as a matrix [vocab_size, embedding_dim]
 pub fn extract_all_embeddings<B: Backend>(model: &Transformer<B>) -> Vec<Vec<f64>> {
-    let vocab_size = 98; // 0-96 for numbers, 97 for '='
+    let vocab_size = ModularAdditionDataset::vocab_size();
     let mut embeddings = Vec::with_capacity(vocab_size);
 
     for token_id in 0..vocab_size {

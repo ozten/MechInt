@@ -45,7 +45,7 @@ impl<B: Backend> Batcher<B, (Vec<usize>, usize), ModularAdditionBatch<B>> for Mo
 }
 
 /// Modular addition dataset: given inputs a and b, predict (a + b) mod p
-/// where p = 97
+/// where p = 113
 #[derive(Debug, Clone)]
 pub struct ModularAdditionDataset {
     /// All possible (a, b) pairs
@@ -53,12 +53,13 @@ pub struct ModularAdditionDataset {
 }
 
 impl ModularAdditionDataset {
-    const MODULUS: usize = 97;
-    const VOCAB_SIZE: usize = 98; // 0-96 for numbers, 97 for '=' token
-    const EQUALS_TOKEN: usize = 97;
+    const MODULUS: usize = 113;
+    const VOCAB_SIZE: usize = 114; // 0-112 for numbers, 113 for '=' token
+    const EQUALS_TOKEN: usize = 113;
+    const TRAIN_FRACTION: f32 = 0.4;
 
-    /// Create a new dataset with all 97x97 = 9409 possible pairs
-    /// Split into train and validation sets (50/50) with fixed seed
+    /// Create a new dataset with all 113x113 = 12769 possible pairs
+    /// Split into train and validation sets with fixed seed
     pub fn new(train: bool, seed: u64) -> Self {
         // Generate all possible (a, b) pairs
         let mut all_examples = Vec::new();
@@ -73,8 +74,8 @@ impl ModularAdditionDataset {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         all_examples.shuffle(&mut rng);
 
-        // Split 50/50
-        let split_idx = all_examples.len() / 2;
+        // Split with fixed fraction to avoid overfeeding the model
+        let split_idx = (all_examples.len() as f32 * Self::TRAIN_FRACTION).round() as usize;
         let examples = if train {
             all_examples[..split_idx].to_vec()
         } else {
@@ -105,6 +106,14 @@ impl ModularAdditionDataset {
 
     pub fn modulus() -> usize {
         Self::MODULUS
+    }
+
+    pub fn train_fraction() -> f32 {
+        Self::TRAIN_FRACTION
+    }
+
+    pub fn equals_token() -> usize {
+        Self::EQUALS_TOKEN
     }
 }
 
@@ -165,10 +174,13 @@ mod tests {
         let train_dataset = ModularAdditionDataset::new(true, 42);
         let val_dataset = ModularAdditionDataset::new(false, 42);
 
-        // Should split 9409 examples 50/50
-        assert_eq!(train_dataset.len(), 4704);
-        assert_eq!(val_dataset.len(), 4705);
-        assert_eq!(train_dataset.len() + val_dataset.len(), 97 * 97);
+        // Should cover full sample space and split within 30-50%
+        let total = ModularAdditionDataset::modulus() * ModularAdditionDataset::modulus();
+        let train_fraction =
+            train_dataset.len() as f32 / (train_dataset.len() + val_dataset.len()) as f32;
+        assert_eq!(train_dataset.len() + val_dataset.len(), total);
+        assert!(train_fraction >= 0.3);
+        assert!(train_fraction <= 0.5);
     }
 
     #[test]
@@ -182,8 +194,9 @@ mod tests {
             let b = input[1];
             let equals = input[2];
 
-            assert_eq!(equals, 97); // Equals token
-            assert_eq!(target, (a + b) % 97);
+            assert_eq!(input.len(), 3);
+            assert_eq!(equals, ModularAdditionDataset::equals_token());
+            assert_eq!(target, (a + b) % ModularAdditionDataset::modulus());
         }
     }
 
@@ -196,5 +209,41 @@ mod tests {
         for i in 0..10 {
             assert_eq!(train1.get(i), train2.get(i));
         }
+    }
+
+    #[test]
+    fn test_vocab_and_target_space() {
+        let dataset = ModularAdditionDataset::new(true, 42);
+        assert_eq!(ModularAdditionDataset::vocab_size(), 114);
+        assert_eq!(ModularAdditionDataset::equals_token(), 113);
+
+        for i in 0..10 {
+            let (input, target) = dataset.get(i).unwrap();
+            assert!(input[0] < ModularAdditionDataset::modulus());
+            assert!(input[1] < ModularAdditionDataset::modulus());
+            assert!(target < ModularAdditionDataset::modulus());
+        }
+    }
+
+    #[test]
+    fn test_full_sample_space_unique() {
+        let train_dataset = ModularAdditionDataset::new(true, 42);
+        let val_dataset = ModularAdditionDataset::new(false, 42);
+        let mut seen = std::collections::HashSet::new();
+
+        for idx in 0..train_dataset.len() {
+            let (input, target) = train_dataset.get(idx).unwrap();
+            let key = (input[0], input[1], target);
+            assert!(seen.insert(key));
+        }
+
+        for idx in 0..val_dataset.len() {
+            let (input, target) = val_dataset.get(idx).unwrap();
+            let key = (input[0], input[1], target);
+            assert!(seen.insert(key));
+        }
+
+        let total = ModularAdditionDataset::modulus() * ModularAdditionDataset::modulus();
+        assert_eq!(seen.len(), total);
     }
 }
