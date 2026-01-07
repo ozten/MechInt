@@ -1,7 +1,4 @@
-use burn::{
-    module::AutodiffModule,
-    tensor::backend::AutodiffBackend,
-};
+use burn::tensor::backend::Backend;
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,9 +15,7 @@ pub struct FFTAnalysis {
 }
 
 /// Analyze the learned token embeddings using FFT
-pub fn analyze_embeddings_fft<B: AutodiffBackend>(
-    model: &Transformer<B>,
-) -> FFTAnalysis {
+pub fn analyze_embeddings_fft<B: Backend>(model: &Transformer<B>) -> FFTAnalysis {
     println!("🔍 Performing FFT analysis on learned embeddings...");
 
     let vocab_size = 98; // 0-96 for numbers, 97 for '='
@@ -83,12 +78,9 @@ pub fn analyze_embeddings_fft<B: AutodiffBackend>(
 }
 
 /// Extract the token embedding for a single token
-fn get_token_embedding<B: AutodiffBackend>(
-    model: &Transformer<B>,
-    token_id: usize,
-) -> Vec<f64> {
+fn get_token_embedding<B: Backend>(model: &Transformer<B>, token_id: usize) -> Vec<f64> {
     // Get the token embedding directly from the model
-    let embedding_tensor = model.valid().get_token_embedding(token_id);
+    let embedding_tensor = model.get_token_embedding(token_id);
 
     // Convert to vector - shape is [1, 1, embedding_dim], we want [embedding_dim]
     let embedding_data: Vec<f32> = embedding_tensor.into_data().to_vec().unwrap();
@@ -201,9 +193,7 @@ impl WeightNormHistory {
 
 /// Compute the L2 norm of all model parameters
 /// This is a simplified version that uses the model's state
-pub fn compute_model_weight_norm<B: AutodiffBackend>(
-    _model: &Transformer<B>,
-) -> f64 {
+pub fn compute_model_weight_norm<B: Backend>(_model: &Transformer<B>) -> f64 {
     // Note: Direct parameter access in Burn requires the Record trait
     // For now, we'll use a simplified approach by tracking optimizer state
     // In a real implementation, we'd use model.into_record() to access weights
@@ -212,9 +202,7 @@ pub fn compute_model_weight_norm<B: AutodiffBackend>(
 }
 
 /// Extract all token embeddings as a matrix [vocab_size, embedding_dim]
-pub fn extract_all_embeddings<B: AutodiffBackend>(
-    model: &Transformer<B>,
-) -> Vec<Vec<f64>> {
+pub fn extract_all_embeddings<B: Backend>(model: &Transformer<B>) -> Vec<Vec<f64>> {
     let vocab_size = 98; // 0-96 for numbers, 97 for '='
     let mut embeddings = Vec::with_capacity(vocab_size);
 

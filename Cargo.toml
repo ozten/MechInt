@@ -20,7 +20,7 @@ name = "test_embedding_viz"
 path = "test_embedding_viz.rs"
 
 [dependencies]
-burn = { version = "0.16", features = ["train", "wgpu", "autodiff", "ndarray"] }
+burn = { version = "0.20.0-pre.6", default-features = false, features = ["std", "tui", "train", "wgpu", "autodiff"] }
 rand = "0.8"
 rustfft = "6.2"
 serde = { version = "1.0", features = ["derive"] }

@@ -1,6 +1,48 @@
-use burn::data::dataset::Dataset;
+use burn::{
+    data::{
+        dataloader::{batcher::Batcher, DataLoader, DataLoaderBuilder},
+        dataset::Dataset,
+    },
+    tensor::{
+        backend::{AutodiffBackend, Backend},
+        Int, Tensor,
+    },
+};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use std::sync::Arc;
+
+/// Batched inputs for modular addition.
+#[derive(Clone, Debug)]
+pub struct ModularAdditionBatch<B: Backend> {
+    pub inputs: Tensor<B, 2, Int>,
+    pub targets: Tensor<B, 1, Int>,
+}
+
+/// Batcher to convert dataset samples into tensors.
+#[derive(Clone, Debug, Default)]
+pub struct ModularAdditionBatcher;
+
+impl<B: Backend> Batcher<B, (Vec<usize>, usize), ModularAdditionBatch<B>> for ModularAdditionBatcher {
+    fn batch(&self, items: Vec<(Vec<usize>, usize)>, device: &B::Device) -> ModularAdditionBatch<B> {
+        let batch_size = items.len();
+        let mut inputs_vec = Vec::with_capacity(batch_size * 3);
+        let mut targets_vec = Vec::with_capacity(batch_size);
+
+        for (input, target) in items {
+            for value in input {
+                inputs_vec.push(value as i32);
+            }
+            targets_vec.push(target as i32);
+        }
+
+        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
+            .reshape([batch_size, 3]);
+        let targets = Tensor::<B, 1, Int>::from_ints(targets_vec.as_slice(), device);
+
+        ModularAdditionBatch { inputs, targets }
+    }
+}
 
 /// Modular addition dataset: given inputs a and b, predict (a + b) mod p
 /// where p = 97
@@ -64,6 +106,37 @@ impl ModularAdditionDataset {
     pub fn modulus() -> usize {
         Self::MODULUS
     }
+}
+
+/// Build Burn dataloaders for modular addition.
+pub fn build_dataloaders<B: AutodiffBackend>(
+    batch_size: usize,
+    num_workers: usize,
+    seed: u64,
+    device: B::Device,
+) -> (
+    Arc<dyn DataLoader<B, ModularAdditionBatch<B>>>,
+    Arc<dyn DataLoader<B::InnerBackend, ModularAdditionBatch<B::InnerBackend>>>,
+)
+where
+    B::Device: Clone,
+{
+    let dataloader_train = DataLoaderBuilder::<B, _, _>::new(ModularAdditionBatcher::default())
+        .batch_size(batch_size)
+        .shuffle(seed)
+        .num_workers(num_workers)
+        .set_device(device.clone())
+        .build(ModularAdditionDataset::new(true, seed));
+
+    let dataloader_val =
+        DataLoaderBuilder::<B::InnerBackend, _, _>::new(ModularAdditionBatcher::default())
+        .batch_size(batch_size)
+        .shuffle(seed)
+        .num_workers(num_workers)
+        .set_device(device)
+        .build(ModularAdditionDataset::new(false, seed));
+
+    (dataloader_train, dataloader_val)
 }
 
 impl Dataset<(Vec<usize>, usize)> for ModularAdditionDataset {

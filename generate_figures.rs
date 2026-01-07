@@ -8,11 +8,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Load loss history
-    let loss_data = fs::read_to_string("loss_history.json")?;
+    let loss_data = fs::read_to_string("artifacts/loss_history.json")?;
     let loss_history: analysis::LossHistory = serde_json::from_str(&loss_data)?;
 
     // Load accuracy history
-    let acc_data = fs::read_to_string("accuracy_history.json")?;
+    let acc_data = fs::read_to_string("artifacts/accuracy_history.json")?;
     let accuracy_history: analysis::AccuracyHistory = serde_json::from_str(&acc_data)?;
 
     println!("📁 Loaded training histories:");

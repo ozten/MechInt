@@ -1,33 +1,29 @@
+#![recursion_limit = "256"]
+
 mod analysis;
 mod checkpoint;
 mod data;
 mod model;
 mod plotting;
+mod training;
 mod verify;
 
 use burn::{
     backend::{wgpu::WgpuDevice, Autodiff, Wgpu},
     data::dataset::Dataset,
-    module::AutodiffModule,
-    nn::loss::CrossEntropyLossConfig,
-    optim::{AdamConfig, GradientsParams, Optimizer},
-    tensor::{backend::AutodiffBackend, Int, Tensor},
+    optim::{lr_scheduler::linear::LinearLrSchedulerConfig, AdamConfig},
+    record::CompactRecorder,
+    train::{
+        metric::{AccuracyMetric, LossMetric, NumericEntry},
+        Learner, LearningParadigm, SupervisedTraining, TrainingStrategy,
+    },
 };
-use data::ModularAdditionDataset;
+use data::{build_dataloaders, ModularAdditionDataset};
 use model::{Transformer, TransformerConfig};
+use std::{fs, path::Path};
 
-type Backend = Wgpu;
-type MyAutodiffBackend = Autodiff<Backend>;
-
-/// Compute learning rate with linear warmup (paper uses 10 steps)
-fn get_learning_rate_with_warmup(step: usize, base_lr: f64, warmup_steps: usize) -> f64 {
-    if step < warmup_steps {
-        // Linear warmup from 0 to base_lr
-        base_lr * (step as f64 + 1.0) / warmup_steps as f64
-    } else {
-        base_lr
-    }
-}
+type WgpuBackend = Wgpu;
+type MyAutodiffBackend = Autodiff<WgpuBackend>;
 
 fn main() {
     println!("🚀 Grokking experiment starting...");
@@ -36,9 +32,9 @@ fn main() {
     println!("  - Optimizer: Adam (β1=0.9, β2=0.98, no weight decay)");
     println!("  - Learning rate: 1e-3 with 10-step linear warmup");
     println!("  - Batch size: 512");
-    println!("  - Training steps: 100,000 (logs every 500 steps)");
+    println!("  - Training steps: 100,000 (mapped to epochs)");
     println!("  - Target: Modular addition (a + b) mod 97");
-    println!("  - Tracking: Train/Val Loss AND Accuracy (full datasets)");
+    println!("  - Tracking: Train/Val Loss AND Accuracy (Burn metrics)");
     println!();
 
     // Setup device
@@ -56,7 +52,7 @@ fn main() {
 
     // Create model
     let config = TransformerConfig::default();
-    let mut model: Transformer<MyAutodiffBackend> = config.init(&device);
+    let model: Transformer<MyAutodiffBackend> = config.init(&device);
     println!("✅ Model initialized");
 
     // Setup optimizer to match paper (Figure 1: Adam without weight decay, β2=0.98)
@@ -64,98 +60,67 @@ fn main() {
         .with_beta_1(0.9)
         .with_beta_2(0.98)  // Paper uses 0.98, not default 0.999
         .with_epsilon(1e-8);
-    let mut optim = optim_config.init();
+    let optim = optim_config.init();
     println!("✅ Adam optimizer initialized (β1=0.9, β2=0.98, no weight decay)");
     println!();
 
     // Training configuration (matching paper)
     let batch_size = 512;
+    let num_workers = 0;
+    let seed = 42;
     let max_steps = 100_000; // Paper uses 1e5-1e6, running 100k (~1 hour)
-    let log_interval = 500; // Log every 500 steps (200 logs total)
     let base_learning_rate = 1e-3;
     let warmup_steps = 10; // Paper uses linear warmup over 10 updates
 
-    println!("🏋️  Starting training for {} steps...", max_steps);
+    let steps_per_epoch = (train_dataset.len() + batch_size - 1) / batch_size;
+    let num_epochs = (max_steps + steps_per_epoch - 1) / steps_per_epoch;
+
+    let artifact_dir = "artifacts";
+    std::fs::create_dir_all(artifact_dir).ok();
+
+    // Build Burn dataloaders
+    let (dataloader_train, dataloader_val) =
+        build_dataloaders::<MyAutodiffBackend>(batch_size, num_workers, seed, device.clone());
+
+    let warmup_start = (base_learning_rate / warmup_steps as f64).max(1.0e-9);
+    let lr_scheduler = LinearLrSchedulerConfig::new(
+        warmup_start,
+        base_learning_rate,
+        warmup_steps,
+    )
+    .init()
+    .expect("Learning rate scheduler should initialize");
+
+    println!(
+        "🏋️  Starting training for {} epochs (~{} steps)...",
+        num_epochs,
+        num_epochs * steps_per_epoch
+    );
     println!("{}", "=".repeat(80));
     println!();
 
-    // Track loss over time (both train and val)
-    let mut loss_history = analysis::LossHistory::new();
+    let training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_val)
+        .metrics((AccuracyMetric::new(), LossMetric::new()))
+        .with_file_checkpointer(CompactRecorder::new())
+        .num_epochs(num_epochs)
+        .with_training_strategy(TrainingStrategy::SingleDevice(device.clone()))
+        .summary();
 
-    // Track accuracy over time
-    let mut accuracy_history = analysis::AccuracyHistory::new();
+    let learner = Learner::new(model, optim, lr_scheduler);
+    let result = training.run(learner);
+    let model = result.model;
 
-    // Track if we've saved grokking checkpoint
-    let mut grokking_checkpoint_saved = false;
+    let (loss_history, accuracy_history) =
+        load_metric_history(artifact_dir, num_epochs, steps_per_epoch);
 
-    // Training loop
-    for step in 0..max_steps {
-        // Sample a batch from training data
-        let (inputs, targets) = sample_batch(&train_dataset, batch_size, &device);
-
-        // Forward pass
-        let logits = model.forward(inputs.clone());
-
-        // Compute loss
-        let loss = CrossEntropyLossConfig::new()
-            .init(&device)
-            .forward(logits.clone(), targets.clone());
-
-        // Backward pass
-        let grads = loss.backward();
-
-        // Update parameters with warmup learning rate
-        let lr = get_learning_rate_with_warmup(step, base_learning_rate, warmup_steps);
-        let grads = GradientsParams::from_grads(grads, &model);
-        model = optim.step(lr, model, grads);
-
-        // Logging
-        if step % log_interval == 0 || step == max_steps - 1 {
-            let train_acc = compute_accuracy(&model, &train_dataset, batch_size, &device);
-            let val_acc = compute_accuracy(&model, &val_dataset, batch_size, &device);
-
-            // Compute train and val loss on full datasets
-            let train_loss = compute_loss(&model, &train_dataset, &device);
-            let val_loss = compute_loss(&model, &val_dataset, &device);
-
-            // Track loss evolution (both train and val)
-            loss_history.add_snapshot(step, train_loss, val_loss);
-
-            // Track accuracy
-            accuracy_history.add_snapshot(step, train_acc, val_acc);
-
-            // Save milestone checkpoints
-            if step == 0 {
-                let _ = checkpoint::save_labeled_checkpoint(&model, "step_0_initial");
-            } else if step == 500 && train_acc > 0.99 {
-                let _ = checkpoint::save_labeled_checkpoint(&model, "step_500_memorized");
-            }
-
-            println!(
-                "Step {:6} | Train Loss: {:.4} | Val Loss: {:.4} | Train Acc: {:6.2}% | Val Acc: {:6.2}%",
-                step,
-                train_loss,
-                val_loss,
-                train_acc * 100.0,
-                val_acc * 100.0
-            );
-
-            // Check for grokking
-            if val_acc > 0.90 && step > 1000 && !grokking_checkpoint_saved {
-                println!();
-                println!("🎉 GROKKING DETECTED! Validation accuracy > 90%");
-                println!("   Step: {}", step);
-                println!("   Train Acc: {:.2}%", train_acc * 100.0);
-                println!("   Val Acc: {:.2}%", val_acc * 100.0);
-
-                // Save checkpoint when grokking is first detected
-                if let Err(e) = checkpoint::save_labeled_checkpoint(&model, &format!("grokking_step_{}", step)) {
-                    eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
-                } else {
-                    grokking_checkpoint_saved = true;
-                }
-            }
+    if let Some(epoch) = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0) {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
+            eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
         }
+    }
+
+    if let Err(e) = copy_checkpoint_set(artifact_dir, num_epochs, "final") {
+        eprintln!("⚠️  Warning: Could not save final checkpoint: {}", e);
     }
 
     println!();
@@ -190,7 +155,8 @@ fn main() {
     println!();
 
     let fft_analysis = analysis::analyze_embeddings_fft(&model);
-    if let Err(e) = analysis::save_fft_analysis(&fft_analysis, "fft_analysis.json") {
+    let fft_analysis_path = format!("{artifact_dir}/fft_analysis.json");
+    if let Err(e) = analysis::save_fft_analysis(&fft_analysis, &fft_analysis_path) {
         eprintln!("⚠️  Warning: Could not save FFT analysis: {}", e);
     }
 
@@ -209,11 +175,13 @@ fn main() {
         }
     }
 
-    if let Err(e) = loss_history.save("loss_history.json") {
+    let loss_history_path = format!("{artifact_dir}/loss_history.json");
+    if let Err(e) = loss_history.save(&loss_history_path) {
         eprintln!("⚠️  Warning: Could not save loss history: {}", e);
     }
 
-    if let Err(e) = accuracy_history.save("accuracy_history.json") {
+    let accuracy_history_path = format!("{artifact_dir}/accuracy_history.json");
+    if let Err(e) = accuracy_history.save(&accuracy_history_path) {
         eprintln!("⚠️  Warning: Could not save accuracy history: {}", e);
     }
 
@@ -311,162 +279,112 @@ fn main() {
         eprintln!("⚠️  Warning: Could not generate FFT spectra plot: {}", e);
     }
 
-    // Save final model checkpoint
-    println!();
-    println!("{}", "=".repeat(80));
-    println!("💾 Saving Model Checkpoints");
-    println!("{}", "=".repeat(80));
-    println!();
-
-    if let Err(e) = checkpoint::save_labeled_checkpoint(&model, "final") {
-        eprintln!("⚠️  Warning: Could not save final checkpoint: {}", e);
-    }
-
-    // List all saved checkpoints
-    match checkpoint::list_checkpoints() {
-        Ok(checkpoints) => {
-            if !checkpoints.is_empty() {
-                println!();
-                println!("📦 Available checkpoints:");
-                for ckpt in checkpoints {
-                    println!("   - checkpoints/{}", ckpt);
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("⚠️  Warning: Could not list checkpoints: {}", e);
-        }
-    }
-
     println!();
     println!("{}", "=".repeat(80));
     println!("🎉 All analysis complete!");
     println!("{}", "=".repeat(80));
 }
 
-/// Sample a random batch from the dataset
-fn sample_batch<B: AutodiffBackend>(
-    dataset: &ModularAdditionDataset,
-    batch_size: usize,
-    device: &B::Device,
-) -> (Tensor<B, 2, Int>, Tensor<B, 1, Int>) {
-    use rand::seq::SliceRandom;
+fn load_metric_history(
+    artifact_dir: &str,
+    num_epochs: usize,
+    steps_per_epoch: usize,
+) -> (analysis::LossHistory, analysis::AccuracyHistory) {
+    let mut loss_history = analysis::LossHistory::new();
+    let mut accuracy_history = analysis::AccuracyHistory::new();
 
-    let indices: Vec<usize> = (0..dataset.len()).collect();
-    let mut rng = rand::thread_rng();
-    let batch_indices: Vec<usize> = indices
-        .choose_multiple(&mut rng, batch_size.min(dataset.len()))
-        .copied()
-        .collect();
-
-    let mut inputs_vec = Vec::new();
-    let mut targets_vec = Vec::new();
-
-    for idx in batch_indices {
-        let (input, target) = dataset.get(idx).unwrap();
-        inputs_vec.extend(input);
-        targets_vec.push(target as i32);
-    }
-
-    let actual_batch_size = targets_vec.len();
-
-    let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
-        .reshape([actual_batch_size, 3]);
-    let targets = Tensor::<B, 1, Int>::from_ints(targets_vec.as_slice(), device);
-
-    (inputs, targets)
-}
-
-/// Compute loss on FULL dataset (no random sampling)
-fn compute_loss<B: AutodiffBackend>(
-    model: &Transformer<B>,
-    dataset: &ModularAdditionDataset,
-    device: &B::Device,
-) -> f64 {
-    let total = dataset.len();
-    let mut total_loss = 0.0f64;
-    let mut total_count = 0;
-
-    // Process in batches to avoid memory issues
-    let batch_size = 100;
-    for batch_start in (0..total).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(total);
-        let batch_len = batch_end - batch_start;
-
-        let mut inputs_vec = Vec::new();
-        let mut targets_vec = Vec::new();
-
-        for idx in batch_start..batch_end {
-            let (input, target) = dataset.get(idx).unwrap();
-            inputs_vec.extend(input);
-            targets_vec.push(target as i32);
+    for epoch in 1..=num_epochs {
+        let train_loss = read_metric_entries(artifact_dir, "train", epoch, "Loss");
+        for (idx, value) in train_loss.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            loss_history.train_snapshots.push((step, value));
         }
 
-        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
-            .reshape([batch_len, 3]);
-        let targets = Tensor::<B, 1, Int>::from_ints(targets_vec.as_slice(), device);
-
-        // Forward pass WITHOUT gradients - use inner backend
-        let logits = model.clone().valid().forward(inputs.inner());
-
-        // Compute loss on inner backend
-        let loss = CrossEntropyLossConfig::new()
-            .init(device)
-            .forward(logits, targets.inner());
-
-        // Extract loss value as f64
-        let loss_data = loss.into_data();
-        let loss_vec: Vec<f32> = loss_data.to_vec().unwrap();
-        let loss_val = loss_vec[0] as f64;
-        total_loss += loss_val * batch_len as f64;
-        total_count += batch_len;
-    }
-
-    total_loss / total_count as f64
-}
-
-/// Compute accuracy on FULL dataset (no random sampling)
-/// This matches the paper's methodology and avoids variance from sampling
-fn compute_accuracy<B: AutodiffBackend>(
-    model: &Transformer<B>,
-    dataset: &ModularAdditionDataset,
-    _batch_size: usize,
-    device: &B::Device,
-) -> f32 {
-    let total = dataset.len();
-    let mut total_correct = 0;
-
-    // Process in batches to avoid memory issues
-    let batch_size = 100;
-    for batch_start in (0..total).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(total);
-        let batch_len = batch_end - batch_start;
-
-        let mut inputs_vec = Vec::new();
-        let mut targets_vec = Vec::new();
-
-        for idx in batch_start..batch_end {
-            let (input, target) = dataset.get(idx).unwrap();
-            inputs_vec.extend(input);
-            targets_vec.push(target as i32);
+        let val_loss = read_metric_entries(artifact_dir, "valid", epoch, "Loss");
+        for (idx, value) in val_loss.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            loss_history.val_snapshots.push((step, value));
         }
 
-        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
-            .reshape([batch_len, 3]);
+        let train_acc = read_metric_entries(artifact_dir, "train", epoch, "Accuracy");
+        for (idx, value) in train_acc.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            accuracy_history
+                .train_snapshots
+                .push((step, (value / 100.0) as f32));
+        }
 
-        // Forward pass WITHOUT gradients
-        let logits = model.clone().valid().forward(inputs.inner());
-        let predictions = logits.argmax(1).squeeze::<1>(1);
-        let predictions_vec: Vec<i32> = predictions.into_data().to_vec().unwrap();
-
-        let correct = predictions_vec
-            .iter()
-            .zip(targets_vec.iter())
-            .filter(|(p, t)| p == t)
-            .count();
-
-        total_correct += correct;
+        let val_acc = read_metric_entries(artifact_dir, "valid", epoch, "Accuracy");
+        for (idx, value) in val_acc.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            accuracy_history
+                .val_snapshots
+                .push((step, (value / 100.0) as f32));
+        }
     }
 
-    total_correct as f32 / total as f32
+    (loss_history, accuracy_history)
+}
+
+fn read_metric_entries(
+    artifact_dir: &str,
+    split: &str,
+    epoch: usize,
+    metric_name: &str,
+) -> Vec<f64> {
+    let path = Path::new(artifact_dir)
+        .join(split)
+        .join(format!("epoch-{epoch}"))
+        .join(format!("{metric_name}.log"));
+
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    contents
+        .lines()
+        .filter_map(|line| NumericEntry::deserialize(line).ok())
+        .map(|entry| entry.current())
+        .collect()
+}
+
+fn find_grokking_epoch(
+    artifact_dir: &str,
+    num_epochs: usize,
+    steps_per_epoch: usize,
+    threshold_pct: f64,
+) -> Option<usize> {
+    for epoch in 1..=num_epochs {
+        let values = read_metric_entries(artifact_dir, "valid", epoch, "Accuracy");
+        for (idx, value) in values.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            if step > 1000 && value >= threshold_pct {
+                return Some(epoch);
+            }
+        }
+    }
+
+    None
+}
+
+fn copy_checkpoint_set(
+    artifact_dir: &str,
+    epoch: usize,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source_dir = Path::new(artifact_dir).join("checkpoint");
+    let dest_dir = Path::new(artifact_dir).join("checkpoint_labeled");
+    fs::create_dir_all(&dest_dir)?;
+
+    for name in ["model", "optim", "scheduler"] {
+        let src = source_dir.join(format!("{name}-{epoch}.mpk"));
+        if !src.exists() {
+            continue;
+        }
+
+        let dst = dest_dir.join(format!("{name}-{label}.mpk"));
+        fs::copy(src, dst)?;
+    }
+
+    Ok(())
 }

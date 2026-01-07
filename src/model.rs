@@ -8,7 +8,7 @@ use burn::{
     tensor::{backend::Backend, Int, Tensor},
 };
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct TransformerConfig {
     pub vocab_size: usize,
     pub seq_length: usize,
@@ -107,7 +107,7 @@ impl<B: Backend> Transformer<B> {
         let input = Tensor::<B, 1, Int>::from_ints(token_vec.as_slice(), &device)
             .reshape([1, 1]);
         let embedding = self.token_embedding.forward(input); // [1, 1, embedding_dim]
-        embedding.squeeze::<2>(1) // Remove seq dimension -> [1, embedding_dim]
+        embedding.squeeze::<2>() // Remove seq dimension -> [1, embedding_dim]
     }
 
     /// Forward pass
@@ -139,7 +139,7 @@ impl<B: Backend> Transformer<B> {
 
         // Take the last position (after '=') for prediction
         let last_hidden = hidden.slice([0..batch_size, (seq_length - 1)..seq_length])
-            .squeeze(1);
+            .squeeze();
 
         // Project to vocabulary
         self.lm_head.forward(last_hidden)
