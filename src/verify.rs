@@ -17,6 +17,7 @@ pub struct GrokkingVerificationConfig {
     pub chance_accuracy: f32,
     pub chance_tolerance: f32,
     pub target_val_acc_threshold: f32,
+    pub accuracy_window: usize,
     pub loss_window: usize,
     pub loss_drop_fraction: f64,
 }
@@ -31,6 +32,7 @@ impl GrokkingVerificationConfig {
             chance_accuracy: 1.0 / modulus as f32,
             chance_tolerance: 0.02,
             target_val_acc_threshold: 0.99,
+            accuracy_window: 5,
             loss_window: 5,
             loss_drop_fraction: 0.5,
         }
@@ -145,6 +147,15 @@ pub fn verify_grokking_phase_transition(
         ));
     }
 
+    verify_accuracy_jump(
+        &accuracy_history.val_snapshots,
+        *transition_step,
+        config.accuracy_window,
+        config.chance_accuracy,
+        config.chance_tolerance,
+        config.target_val_acc_threshold,
+    )?;
+
     let loss_drop_ratio = verify_loss_drop(
         &loss_history.val_snapshots,
         *transition_step,
@@ -158,6 +169,51 @@ pub fn verify_grokking_phase_transition(
         plateau_max_val_acc,
         loss_drop_ratio,
     })
+}
+
+fn verify_accuracy_jump(
+    val_accuracy: &[(usize, f32)],
+    transition_step: usize,
+    window: usize,
+    chance_accuracy: f32,
+    chance_tolerance: f32,
+    target_val_acc_threshold: f32,
+) -> Result<(), String> {
+    let before_values: Vec<f32> = val_accuracy
+        .iter()
+        .filter(|(step, _)| *step < transition_step)
+        .map(|(_, acc)| *acc)
+        .collect();
+
+    let after_values: Vec<f32> = val_accuracy
+        .iter()
+        .filter(|(step, _)| *step >= transition_step)
+        .map(|(_, acc)| *acc)
+        .collect();
+
+    if before_values.len() < window || after_values.len() < window {
+        return Err("insufficient accuracy samples around transition".to_string());
+    }
+
+    let before_avg: f32 =
+        before_values[before_values.len() - window..].iter().sum::<f32>() / window as f32;
+    let after_avg: f32 = after_values[..window].iter().sum::<f32>() / window as f32;
+
+    if before_avg > chance_accuracy + chance_tolerance {
+        return Err(format!(
+            "validation accuracy plateau too high before transition (avg {:.4})",
+            before_avg
+        ));
+    }
+
+    if after_avg < target_val_acc_threshold {
+        return Err(format!(
+            "validation accuracy after transition too low (avg {:.4})",
+            after_avg
+        ));
+    }
+
+    Ok(())
 }
 
 fn verify_loss_drop(
@@ -685,6 +741,7 @@ mod tests {
             early_step_max: 1000,
             plateau_min_step: 1500,
             generalization_window: 1500,
+            accuracy_window: 2,
             loss_window: 2,
             ..GrokkingVerificationConfig::default_for_modulus(ModularAdditionDataset::modulus())
         };
@@ -706,6 +763,7 @@ mod tests {
             early_step_max: 1000,
             plateau_min_step: 1000,
             generalization_window: 1000,
+            accuracy_window: 2,
             loss_window: 2,
             ..GrokkingVerificationConfig::default_for_modulus(ModularAdditionDataset::modulus())
         };
@@ -713,6 +771,40 @@ mod tests {
         let err = verify_grokking_phase_transition(&loss_history, &accuracy_history, &config)
             .expect_err("expected grokking verification to fail");
         assert!(err.contains("validation accuracy never reaches target"));
+    }
+
+    #[test]
+    fn grokking_phase_verification_fails_with_slow_accuracy_rise() {
+        let train_acc = vec![(0, 0.2), (500, 0.995), (1000, 0.999)];
+        let val_acc = vec![
+            (0, 0.01),
+            (500, 0.01),
+            (1500, 0.5),
+            (2000, 0.6),
+            (2200, 0.995),
+            (2500, 0.999),
+        ];
+        let val_loss = vec![
+            (0, 2.0),
+            (500, 2.0),
+            (1500, 2.0),
+            (2200, 0.2),
+            (2500, 0.15),
+        ];
+
+        let (loss_history, accuracy_history) = make_histories(&train_acc, &val_acc, &val_loss);
+        let config = GrokkingVerificationConfig {
+            early_step_max: 1000,
+            plateau_min_step: 1000,
+            generalization_window: 2000,
+            accuracy_window: 2,
+            loss_window: 2,
+            ..GrokkingVerificationConfig::default_for_modulus(ModularAdditionDataset::modulus())
+        };
+
+        let err = verify_grokking_phase_transition(&loss_history, &accuracy_history, &config)
+            .expect_err("expected grokking verification to fail");
+        assert!(err.contains("plateau too high"));
     }
 
     #[test]
