@@ -72,3 +72,12 @@
 - All 54 library tests pass
 - Suggestions: wire this verification into post-grokking checkpoint analysis to validate Fourier structure hypothesis
 
+## [2026-01-08 00:05:00] Completed MechInt-ybn
+- Determined Section 5.5 (6D manifold visualization) is OUT OF SCOPE for this repository
+- Section 5.5 describes Claude 3.5 Haiku internal representations for character/line counting
+- This repo focuses on modular arithmetic grokking (Power et al. 2022)
+- Requires proprietary model access and different task domain (NLP vs arithmetic)
+- All other spec visualizations (5.1-5.4) are implemented and in scope
+- Decision documented in docs/section_5.5_scope_decision.md for future reference
+- Suggestions: 6D manifold analysis would require separate repo with Claude API/model access
+
