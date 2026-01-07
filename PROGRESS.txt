@@ -3,3 +3,19 @@
 - Added restricted-loss verification logic with synthetic tests
 - Added token-weight forward path for filtered embeddings and ignored git scratch dir
 - Suggestions: integrate restricted/excluded loss into training metrics when ready
+
+## [2026-01-07 21:40:20] Completed MechInt-7ak
+- Added excluded-loss computation (top-k frequencies removed) and saved excluded loss history
+- Added excluded-loss spike verification and synthetic tests
+- Logged excluded loss for initial/grokking/final checkpoints when available
+- Suggestions: tune excluded-loss spike thresholds once real training metrics are available
+
+## [2026-01-07 21:47:45] Completed MechInt-fej
+- Added Fourier-plane projection and clock-geometry verification for token embeddings
+- Added unit tests for clean-circle pass and wrong-frequency failure cases
+- Suggestions: wire embedding clock verification into any future checkpoint analysis pipeline
+
+## [2026-01-07 22:10:05] Completed MechInt-4uj
+- Matched transformer defaults to the 1-layer spec and removed LayerNorm usage
+- Added causal-mask wiring plus unit tests for config, embeddings, biases, activation, and masking
+- Suggestions: update training/spec docs if any remaining references assume 2 layers

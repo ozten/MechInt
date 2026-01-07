@@ -32,7 +32,7 @@ fn main() {
 
     println!("🚀 Grokking experiment starting...");
     println!("Configuration:");
-    println!("  - Model: 2-layer transformer (4 heads, dim=128, MLP=512)");
+    println!("  - Model: 1-layer transformer (4 heads, dim=128, MLP=512)");
     println!("  - Optimizer: AdamW (β1=0.9, β2=0.98, weight decay=1.0)");
     println!(
         "  - Learning rate: {} with {}-step linear warmup",

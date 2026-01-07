@@ -2,10 +2,12 @@ use burn::{
     config::Config,
     module::Module,
     nn::{
-        attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig},
-        Embedding, EmbeddingConfig, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig,
+        attention::{
+            generate_autoregressive_mask, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig,
+        },
+        Embedding, EmbeddingConfig, Linear, LinearConfig, Relu,
     },
-    tensor::{backend::Backend, Int, Tensor},
+    tensor::{backend::Backend, Bool, Int, Tensor},
 };
 use burn::tensor::module::embedding;
 
@@ -29,7 +31,7 @@ impl Default for TransformerConfig {
             d_model: 128,         // embedding dimension
             n_heads: 4,           // attention heads
             d_ff: 512,            // MLP hidden dimension
-            n_layers: 2,          // transformer layers
+            n_layers: 1,          // transformer layers
         }
     }
 }
@@ -40,7 +42,6 @@ pub struct Transformer<B: Backend> {
     token_embedding: Embedding<B>,
     position_embedding: Embedding<B>,
     layers: Vec<TransformerLayer<B>>,
-    ln_f: LayerNorm<B>,
     lm_head: Linear<B>,
     d_model: usize,
     seq_length: usize,
@@ -49,16 +50,14 @@ pub struct Transformer<B: Backend> {
 #[derive(Module, Debug)]
 struct TransformerLayer<B: Backend> {
     attention: MultiHeadAttention<B>,
-    ln1: LayerNorm<B>,
     mlp: MLP<B>,
-    ln2: LayerNorm<B>,
 }
 
 #[derive(Module, Debug)]
 struct MLP<B: Backend> {
     fc1: Linear<B>,
     fc2: Linear<B>,
-    activation: Gelu,
+    activation: Relu,
 }
 
 impl TransformerConfig {
@@ -82,9 +81,6 @@ impl TransformerConfig {
             ));
         }
 
-        // Final layer norm
-        let ln_f = LayerNormConfig::new(self.d_model).init(device);
-
         // Language model head (d_model -> vocab_size)
         let lm_head = LinearConfig::new(self.d_model, self.vocab_size)
             .init(device);
@@ -93,7 +89,6 @@ impl TransformerConfig {
             token_embedding,
             position_embedding,
             layers,
-            ln_f,
             lm_head,
             d_model: self.d_model,
             seq_length: self.seq_length,
@@ -136,13 +131,12 @@ impl<B: Backend> Transformer<B> {
         // Add token and position embeddings
         let mut hidden = tok_emb + pos_emb;
 
+        let attn_mask = generate_autoregressive_mask::<B>(batch_size, seq_length, &device);
+
         // Apply transformer layers
         for layer in &self.layers {
-            hidden = layer.forward(hidden);
+            hidden = layer.forward(hidden, &attn_mask);
         }
-
-        // Final layer norm
-        hidden = self.ln_f.forward(hidden);
 
         // Take the last position (after '=') for prediction
         let last_hidden = hidden.slice([0..batch_size, (seq_length - 1)..seq_length])
@@ -172,13 +166,12 @@ impl<B: Backend> Transformer<B> {
         // Add token and position embeddings
         let mut hidden = tok_emb + pos_emb;
 
+        let attn_mask = generate_autoregressive_mask::<B>(batch_size, seq_length, &device);
+
         // Apply transformer layers
         for layer in &self.layers {
-            hidden = layer.forward(hidden);
+            hidden = layer.forward(hidden, &attn_mask);
         }
-
-        // Final layer norm
-        hidden = self.ln_f.forward(hidden);
 
         // Take the last position (after '=') for prediction
         let last_hidden = hidden
@@ -195,32 +188,19 @@ impl<B: Backend> TransformerLayer<B> {
         let attention = MultiHeadAttentionConfig::new(d_model, n_heads)
             .init(device);
 
-        let ln1 = LayerNormConfig::new(d_model).init(device);
-        let ln2 = LayerNormConfig::new(d_model).init(device);
-
         let mlp = MLP::new(d_model, d_ff, device);
 
-        Self {
-            attention,
-            ln1,
-            mlp,
-            ln2,
-        }
+        Self { attention, mlp }
     }
 
-    fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        // Pre-norm architecture
-        // Self-attention with residual
-        // Note: Causal masking not strictly needed for this task since we see full input [a,b,=]
-        // before predicting. Standard attention is sufficient.
-        let normed = self.ln1.forward(x.clone());
-        let mha_input = MhaInput::self_attn(normed);
+    fn forward(&self, x: Tensor<B, 3>, attn_mask: &Tensor<B, 3, Bool>) -> Tensor<B, 3> {
+        // Self-attention with causal mask and residual connection.
+        let mha_input = MhaInput::self_attn(x.clone()).mask_attn(attn_mask.clone());
         let mha_output = self.attention.forward(mha_input);
         let x = x + mha_output.context;
 
         // MLP with residual
-        let normed = self.ln2.forward(x.clone());
-        let mlp_out = self.mlp.forward(normed);
+        let mlp_out = self.mlp.forward(x.clone());
         x + mlp_out
     }
 }
@@ -229,7 +209,7 @@ impl<B: Backend> MLP<B> {
     fn new(d_model: usize, d_ff: usize, device: &B::Device) -> Self {
         let fc1 = LinearConfig::new(d_model, d_ff).init(device);
         let fc2 = LinearConfig::new(d_ff, d_model).init(device);
-        let activation = Gelu::new();
+        let activation = Relu::new();
 
         Self { fc1, fc2, activation }
     }
@@ -245,6 +225,8 @@ impl<B: Backend> MLP<B> {
 mod tests {
     use super::*;
     use burn::backend::NdArray;
+    use burn::tensor::TensorData;
+    use std::any::type_name;
 
     type TestBackend = NdArray;
 
@@ -263,7 +245,7 @@ mod tests {
 
         // Create a batch of input sequences
         let batch_size = 4;
-        let seq_length = 3;
+        let _seq_length = 3;
 
         // Dummy input: [[0, 1, 113], [2, 3, 113], ...]
         let input = Tensor::<TestBackend, 2, Int>::from_data(
@@ -276,5 +258,98 @@ mod tests {
 
         // Check output shape: [batch_size, vocab_size]
         assert_eq!(logits.dims(), [batch_size, ModularAdditionDataset::vocab_size()]);
+    }
+
+    #[test]
+    fn test_config_matches_spec() {
+        let config = TransformerConfig::default();
+        assert_eq!(config.d_model, 128);
+        assert_eq!(config.n_heads, 4);
+        assert_eq!(config.d_ff, 512);
+        assert_eq!(config.n_layers, 1);
+        assert_eq!(config.seq_length, 3);
+        assert_eq!(config.d_model / config.n_heads, 32);
+    }
+
+    #[test]
+    fn test_embeddings_are_learned_and_sized() {
+        let device = Default::default();
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        let [vocab_size, d_model] = model.token_embedding.weight.dims();
+        assert_eq!(vocab_size, ModularAdditionDataset::vocab_size());
+        assert_eq!(d_model, config.d_model);
+
+        let [pos_length, pos_dim] = model.position_embedding.weight.dims();
+        assert_eq!(pos_length, config.seq_length);
+        assert_eq!(pos_dim, config.d_model);
+    }
+
+    #[test]
+    fn test_biases_enabled() {
+        let device = Default::default();
+        let model = TransformerConfig::default().init::<TestBackend>(&device);
+        let layer = &model.layers[0];
+
+        assert!(model.lm_head.bias.is_some());
+        assert!(layer.attention.query.bias.is_some());
+        assert!(layer.attention.key.bias.is_some());
+        assert!(layer.attention.value.bias.is_some());
+        assert!(layer.attention.output.bias.is_some());
+        assert!(layer.mlp.fc1.bias.is_some());
+        assert!(layer.mlp.fc2.bias.is_some());
+    }
+
+    #[test]
+    fn test_activation_is_relu() {
+        let device = Default::default();
+        let model = TransformerConfig::default().init::<TestBackend>(&device);
+        let activation_name = std::any::type_name_of_val(&model.layers[0].mlp.activation);
+        assert_eq!(activation_name, type_name::<Relu>());
+    }
+
+    #[test]
+    fn test_no_layer_norm_modules() {
+        let device = Default::default();
+        let model = TransformerConfig::default().init::<TestBackend>(&device);
+        let display = format!("{model}");
+        assert!(!display.contains("LayerNorm"));
+    }
+
+    #[test]
+    fn test_causal_mask_applied_in_layer() {
+        let device = Default::default();
+        let layer = TransformerLayer::new(8, 2, 16, &device);
+        let input = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new((0..24).map(|v| v as f32).collect(), [1, 3, 8]),
+            &device,
+        );
+        let mask = generate_autoregressive_mask::<TestBackend>(1, 3, &device);
+
+        let expected_masked = {
+            let mha_input = MhaInput::self_attn(input.clone()).mask_attn(mask.clone());
+            let mha_output = layer.attention.forward(mha_input);
+            let x = input.clone() + mha_output.context;
+            let mlp_out = layer.mlp.forward(x.clone());
+            x + mlp_out
+        };
+
+        let expected_unmasked = {
+            let mha_input = MhaInput::self_attn(input.clone());
+            let mha_output = layer.attention.forward(mha_input);
+            let x = input.clone() + mha_output.context;
+            let mlp_out = layer.mlp.forward(x.clone());
+            x + mlp_out
+        };
+
+        let actual = layer.forward(input, &mask);
+
+        let actual_vec = actual.into_data().to_vec::<f32>().unwrap();
+        let masked_vec = expected_masked.into_data().to_vec::<f32>().unwrap();
+        let unmasked_vec = expected_unmasked.into_data().to_vec::<f32>().unwrap();
+
+        assert_eq!(actual_vec, masked_vec);
+        assert_ne!(masked_vec, unmasked_vec);
     }
 }
