@@ -39,3 +39,9 @@
 - Added pairwise manifold circularity verification using post-ReLU MLP activations
 - Loaded pre/post checkpoints to compare ring emergence and logged verification output
 - Added synthetic unit tests for pass/fail circularity transitions
+## [2026-01-07 22:47:30] Completed MechInt-pnn
+- Added diagonal ridge verification tests for constructive interference surfaces
+- Implemented 5 comprehensive test cases covering diagonal, anti-diagonal, axis-aligned, flat, and noise patterns
+- Tests confirm metric correctly detects diagonal periodicity stronger than axis-aligned periodicity
+- Suggestions: apply this verification to post-grokking MLP neuron activations to validate interference hypothesis
+
