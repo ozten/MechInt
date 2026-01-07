@@ -142,6 +142,34 @@ pub struct PairwiseManifoldTransitionReport {
     pub total_pairs: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct DiagonalRidgeConfig {
+    pub neuron_index: usize,
+    pub max_lag: usize,
+    pub min_diagonal_ratio: f64,
+    pub min_diagonal_score: f64,
+}
+
+impl DiagonalRidgeConfig {
+    pub fn default_for_modulus(modulus: usize) -> Self {
+        let max_lag = (modulus / 10).max(4).min(20);
+        Self {
+            neuron_index: 10,
+            max_lag,
+            min_diagonal_ratio: 1.3,
+            min_diagonal_score: 0.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiagonalRidgeReport {
+    pub neuron_index: usize,
+    pub diagonal_score: f64,
+    pub axis_score: f64,
+    pub ratio: f64,
+}
+
 pub fn verify_grokking_phase_transition(
     loss_history: &LossHistory,
     accuracy_history: &AccuracyHistory,
@@ -473,6 +501,91 @@ pub fn verify_mlp_pairwise_manifold_transition<B: Backend>(
     verify_pairwise_manifold_transition_from_signals(&pre_signals, &post_signals, config)
 }
 
+pub fn collect_mlp_activation_surface<B: Backend>(
+    model: &Transformer<B>,
+    device: &B::Device,
+    neuron_index: usize,
+) -> Result<Vec<Vec<f64>>, String> {
+    let modulus = ModularAdditionDataset::modulus();
+    let equals_token = ModularAdditionDataset::equals_token();
+
+    let mut inputs_vec = Vec::with_capacity(modulus * modulus * 3);
+    for x in 0..modulus {
+        for y in 0..modulus {
+            inputs_vec.push(x as i32);
+            inputs_vec.push(y as i32);
+            inputs_vec.push(equals_token as i32);
+        }
+    }
+
+    let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
+        .reshape([modulus * modulus, 3]);
+    let (_, mlp_acts) = model.forward_with_mlp_activations(inputs);
+    let [batch_size, d_ff] = mlp_acts.dims();
+    if batch_size != modulus * modulus {
+        return Err(format!(
+            "unexpected activation batch size {} (expected {})",
+            batch_size,
+            modulus * modulus
+        ));
+    }
+    if neuron_index >= d_ff {
+        return Err(format!(
+            "neuron index {} out of range (d_ff={})",
+            neuron_index, d_ff
+        ));
+    }
+
+    let data: Vec<f32> = mlp_acts.into_data().to_vec().unwrap();
+    let mut surface = vec![vec![0.0f64; modulus]; modulus];
+    for x in 0..modulus {
+        for y in 0..modulus {
+            let batch = x * modulus + y;
+            let idx = batch * d_ff + neuron_index;
+            surface[x][y] = data[idx] as f64;
+        }
+    }
+
+    Ok(surface)
+}
+
+pub fn verify_constructive_interference_surface_from_grid(
+    surface: &[Vec<f64>],
+    config: &DiagonalRidgeConfig,
+) -> Result<DiagonalRidgeReport, String> {
+    let (diag_main, diag_anti, axis_x, axis_y) =
+        surface_autocorrelation_scores(surface, config.max_lag)?;
+
+    let diagonal_score = diag_main.max(diag_anti);
+    let axis_score = axis_x.max(axis_y);
+    let ratio = if axis_score > 0.0 {
+        diagonal_score / axis_score
+    } else {
+        f64::INFINITY
+    };
+
+    if diagonal_score < config.min_diagonal_score {
+        return Err(format!(
+            "diagonal autocorrelation {:.3} below threshold {:.3}",
+            diagonal_score, config.min_diagonal_score
+        ));
+    }
+
+    if ratio < config.min_diagonal_ratio {
+        return Err(format!(
+            "diagonal/axis ratio {:.3} below threshold {:.3}",
+            ratio, config.min_diagonal_ratio
+        ));
+    }
+
+    Ok(DiagonalRidgeReport {
+        neuron_index: config.neuron_index,
+        diagonal_score,
+        axis_score,
+        ratio,
+    })
+}
+
 pub fn verify_pairwise_manifold_transition_from_signals(
     pre_signals: &[(usize, Vec<f64>)],
     post_signals: &[(usize, Vec<f64>)],
@@ -718,6 +831,125 @@ fn collect_mlp_post_relu_activations<B: Backend>(
     }
 
     Ok(per_neuron)
+}
+
+fn surface_autocorrelation_scores(
+    surface: &[Vec<f64>],
+    max_lag: usize,
+) -> Result<(f64, f64, f64, f64), String> {
+    let (height, width) = surface_dimensions(surface)?;
+    if height < 2 || width < 2 {
+        return Err("surface grid too small".to_string());
+    }
+
+    let (mean, var) = surface_mean_variance(surface)?;
+    if var == 0.0 {
+        return Err("surface variance is zero".to_string());
+    }
+
+    let max_lag = max_lag.min(height.saturating_sub(1)).min(width.saturating_sub(1));
+    if max_lag == 0 {
+        return Err("max_lag too small for surface".to_string());
+    }
+
+    let diag_main = average_autocorrelation(surface, mean, var, max_lag, 1, 1)?;
+    let diag_anti = average_autocorrelation(surface, mean, var, max_lag, 1, -1)?;
+    let axis_x = average_autocorrelation(surface, mean, var, max_lag, 1, 0)?;
+    let axis_y = average_autocorrelation(surface, mean, var, max_lag, 0, 1)?;
+
+    Ok((diag_main, diag_anti, axis_x, axis_y))
+}
+
+fn surface_dimensions(surface: &[Vec<f64>]) -> Result<(usize, usize), String> {
+    let height = surface.len();
+    if height == 0 {
+        return Err("surface is empty".to_string());
+    }
+    let width = surface[0].len();
+    if width == 0 {
+        return Err("surface has empty rows".to_string());
+    }
+    for (idx, row) in surface.iter().enumerate() {
+        if row.len() != width {
+            return Err(format!(
+                "surface row {} has length {}, expected {}",
+                idx,
+                row.len(),
+                width
+            ));
+        }
+    }
+    Ok((height, width))
+}
+
+fn surface_mean_variance(surface: &[Vec<f64>]) -> Result<(f64, f64), String> {
+    let (height, width) = surface_dimensions(surface)?;
+    let mut sum = 0.0;
+    for row in surface {
+        for value in row {
+            sum += *value;
+        }
+    }
+    let count = (height * width) as f64;
+    let mean = sum / count;
+    let mut variance = 0.0;
+    for row in surface {
+        for value in row {
+            let diff = *value - mean;
+            variance += diff * diff;
+        }
+    }
+    variance /= count;
+    Ok((mean, variance))
+}
+
+fn average_autocorrelation(
+    surface: &[Vec<f64>],
+    mean: f64,
+    variance: f64,
+    max_lag: usize,
+    dx: i32,
+    dy: i32,
+) -> Result<f64, String> {
+    let (height, width) = surface_dimensions(surface)?;
+    let mut total = 0.0;
+    let mut lag_count = 0usize;
+
+    for lag in 1..=max_lag {
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        let lag = lag as i32;
+        for x in 0..height {
+            for y in 0..width {
+                let x2 = x as i32 + dx * lag;
+                let y2 = y as i32 + dy * lag;
+                if x2 < 0 || y2 < 0 {
+                    continue;
+                }
+                let x2 = x2 as usize;
+                let y2 = y2 as usize;
+                if x2 >= height || y2 >= width {
+                    continue;
+                }
+                let a = surface[x][y] - mean;
+                let b = surface[x2][y2] - mean;
+                sum += a * b;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let corr = sum / (count as f64 * variance);
+        total += corr.abs();
+        lag_count += 1;
+    }
+
+    if lag_count == 0 {
+        return Err("no valid lags for autocorrelation".to_string());
+    }
+
+    Ok(total / lag_count as f64)
 }
 
 fn analyze_mlp_activation_wave(
@@ -1264,5 +1496,127 @@ mod tests {
         )
         .expect_err("expected pairwise manifold transition to fail");
         assert!(err.contains("post-grok") || err.contains("pre-grok"));
+    }
+
+    #[test]
+    fn diagonal_ridge_verification_passes_on_diagonal_corrugation() {
+        let n = 50;
+        let mut surface = vec![vec![0.0; n]; n];
+
+        // Create diagonal ridges: f(x,y) = sin(2π * freq * (x+y) / n)
+        let freq = 3.0;
+        for x in 0..n {
+            for y in 0..n {
+                let angle = 2.0 * std::f64::consts::PI * freq * (x + y) as f64 / n as f64;
+                surface[x][y] = angle.sin();
+            }
+        }
+
+        let config = DiagonalRidgeConfig {
+            neuron_index: 10,
+            max_lag: 8,
+            min_diagonal_ratio: 1.3,
+            min_diagonal_score: 0.2,
+        };
+
+        let report = verify_constructive_interference_surface_from_grid(&surface, &config)
+            .expect("expected diagonal ridge verification to pass");
+        assert!(report.diagonal_score > report.axis_score);
+        assert!(report.ratio >= config.min_diagonal_ratio);
+        assert!(report.diagonal_score >= config.min_diagonal_score);
+    }
+
+    #[test]
+    fn diagonal_ridge_verification_passes_on_anti_diagonal_pattern() {
+        let n = 50;
+        let mut surface = vec![vec![0.0; n]; n];
+
+        // Create anti-diagonal ridges: f(x,y) = sin(2π * freq * (x-y) / n)
+        let freq = 3.0;
+        for x in 0..n {
+            for y in 0..n {
+                let angle = 2.0 * std::f64::consts::PI * freq * (x as i32 - y as i32) as f64 / n as f64;
+                surface[x][y] = angle.sin();
+            }
+        }
+
+        let config = DiagonalRidgeConfig {
+            neuron_index: 10,
+            max_lag: 8,
+            min_diagonal_ratio: 1.3,
+            min_diagonal_score: 0.2,
+        };
+
+        let report = verify_constructive_interference_surface_from_grid(&surface, &config)
+            .expect("expected anti-diagonal ridge verification to pass");
+        assert!(report.diagonal_score > report.axis_score);
+        assert!(report.ratio >= config.min_diagonal_ratio);
+    }
+
+    #[test]
+    fn diagonal_ridge_verification_fails_on_axis_aligned_pattern() {
+        let n = 50;
+        let mut surface = vec![vec![0.0; n]; n];
+
+        // Create axis-aligned ridges: f(x,y) = sin(2π * freq * x / n)
+        let freq = 3.0;
+        for x in 0..n {
+            for y in 0..n {
+                let angle = 2.0 * std::f64::consts::PI * freq * x as f64 / n as f64;
+                surface[x][y] = angle.sin();
+            }
+        }
+
+        let config = DiagonalRidgeConfig {
+            neuron_index: 10,
+            max_lag: 8,
+            min_diagonal_ratio: 1.3,
+            min_diagonal_score: 0.2,
+        };
+
+        let err = verify_constructive_interference_surface_from_grid(&surface, &config)
+            .expect_err("expected axis-aligned pattern to fail diagonal verification");
+        assert!(err.contains("diagonal/axis ratio") || err.contains("diagonal autocorrelation"));
+    }
+
+    #[test]
+    fn diagonal_ridge_verification_fails_on_flat_surface() {
+        let n = 50;
+        let surface = vec![vec![1.5; n]; n];
+
+        let config = DiagonalRidgeConfig {
+            neuron_index: 10,
+            max_lag: 8,
+            min_diagonal_ratio: 1.3,
+            min_diagonal_score: 0.2,
+        };
+
+        let err = verify_constructive_interference_surface_from_grid(&surface, &config)
+            .expect_err("expected flat surface to fail");
+        assert!(err.contains("surface variance is zero"));
+    }
+
+    #[test]
+    fn diagonal_ridge_verification_fails_on_random_noise() {
+        let n = 50;
+        let mut surface = vec![vec![0.0; n]; n];
+
+        // Create random noise (low autocorrelation everywhere)
+        for x in 0..n {
+            for y in 0..n {
+                surface[x][y] = ((x * 17 + y * 31) % 100) as f64 / 100.0;
+            }
+        }
+
+        let config = DiagonalRidgeConfig {
+            neuron_index: 10,
+            max_lag: 8,
+            min_diagonal_ratio: 1.3,
+            min_diagonal_score: 0.2,
+        };
+
+        let err = verify_constructive_interference_surface_from_grid(&surface, &config)
+            .expect_err("expected random noise to fail diagonal verification");
+        assert!(err.contains("diagonal/axis ratio") || err.contains("diagonal autocorrelation"));
     }
 }
