@@ -24,6 +24,7 @@ while [ $iteration -lt $MAX_ITERATIONS ]; do
     
     # Run Codex with the prompt
     codex exec \
+        -C /Users/admin/MechInt -c 'network_access="enabled"' \
         --full-auto \
         --sandbox danger-full-access \
         --json \
