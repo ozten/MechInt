@@ -96,6 +96,52 @@ pub struct MlpWaveReport {
     pub neuron_reports: Vec<MlpWaveNeuronReport>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PairwiseManifoldConfig {
+    pub fixed_y: usize,
+    pub neuron_indices: Vec<usize>,
+    pub min_post_score: f64,
+    pub max_pre_score: f64,
+    pub max_axis_ratio: f64,
+    pub min_pairs_passing: usize,
+}
+
+impl PairwiseManifoldConfig {
+    pub fn default_for_modulus(_modulus: usize) -> Self {
+        Self {
+            fixed_y: 0,
+            neuron_indices: (0..7).collect(),
+            min_post_score: 0.75,
+            max_pre_score: 0.55,
+            max_axis_ratio: 8.0,
+            min_pairs_passing: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PairwiseManifoldPairReport {
+    pub neuron_a: usize,
+    pub neuron_b: usize,
+    pub circularity_score: f64,
+    pub radius_cv: f64,
+    pub axis_ratio: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairwiseManifoldReport {
+    pub pair_reports: Vec<PairwiseManifoldPairReport>,
+    pub average_score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairwiseManifoldTransitionReport {
+    pub pre_average_score: f64,
+    pub post_average_score: f64,
+    pub passing_pairs: usize,
+    pub total_pairs: usize,
+}
+
 pub fn verify_grokking_phase_transition(
     loss_history: &LossHistory,
     accuracy_history: &AccuracyHistory,
@@ -376,6 +422,230 @@ pub fn verify_mlp_activation_waves_from_signals(
     Ok(MlpWaveReport {
         neuron_reports: reports,
     })
+}
+
+pub fn verify_mlp_pairwise_manifold_transition<B: Backend>(
+    pre_model: &Transformer<B>,
+    post_model: &Transformer<B>,
+    device: &B::Device,
+    config: &PairwiseManifoldConfig,
+) -> Result<PairwiseManifoldTransitionReport, String> {
+    let modulus = ModularAdditionDataset::modulus();
+    if config.fixed_y >= modulus {
+        return Err(format!(
+            "fixed_y {} out of range (modulus {})",
+            config.fixed_y, modulus
+        ));
+    }
+
+    let pre_activations = collect_mlp_post_relu_activations(pre_model, device, config.fixed_y)?;
+    let post_activations = collect_mlp_post_relu_activations(post_model, device, config.fixed_y)?;
+
+    let d_ff = pre_activations.len();
+    if post_activations.len() != d_ff {
+        return Err("post activations shape mismatch".to_string());
+    }
+
+    if config.neuron_indices.len() < 2 {
+        return Err("need at least two neuron indices".to_string());
+    }
+
+    for &idx in &config.neuron_indices {
+        if idx >= d_ff {
+            return Err(format!(
+                "neuron index {} out of range (d_ff={})",
+                idx, d_ff
+            ));
+        }
+    }
+
+    let pre_signals: Vec<(usize, Vec<f64>)> = config
+        .neuron_indices
+        .iter()
+        .map(|&idx| (idx, pre_activations[idx].clone()))
+        .collect();
+    let post_signals: Vec<(usize, Vec<f64>)> = config
+        .neuron_indices
+        .iter()
+        .map(|&idx| (idx, post_activations[idx].clone()))
+        .collect();
+
+    verify_pairwise_manifold_transition_from_signals(&pre_signals, &post_signals, config)
+}
+
+pub fn verify_pairwise_manifold_transition_from_signals(
+    pre_signals: &[(usize, Vec<f64>)],
+    post_signals: &[(usize, Vec<f64>)],
+    config: &PairwiseManifoldConfig,
+) -> Result<PairwiseManifoldTransitionReport, String> {
+    let pre_report = evaluate_pairwise_manifolds_from_signals(pre_signals)?;
+    let post_report = evaluate_pairwise_manifolds_from_signals(post_signals)?;
+
+    if pre_report.average_score > config.max_pre_score {
+        return Err(format!(
+            "pre-grok average circularity {:.3} exceeds threshold {:.3}",
+            pre_report.average_score, config.max_pre_score
+        ));
+    }
+
+    let passing_pairs = post_report
+        .pair_reports
+        .iter()
+        .filter(|pair| {
+            pair.circularity_score >= config.min_post_score
+                && pair.axis_ratio <= config.max_axis_ratio
+        })
+        .count();
+    if passing_pairs < config.min_pairs_passing {
+        return Err(format!(
+            "post-grok only {} pairs meet circularity threshold (need {})",
+            passing_pairs, config.min_pairs_passing
+        ));
+    }
+
+    Ok(PairwiseManifoldTransitionReport {
+        pre_average_score: pre_report.average_score,
+        post_average_score: post_report.average_score,
+        passing_pairs,
+        total_pairs: post_report.pair_reports.len(),
+    })
+}
+
+fn evaluate_pairwise_manifolds_from_signals(
+    signals: &[(usize, Vec<f64>)],
+) -> Result<PairwiseManifoldReport, String> {
+    if signals.len() < 2 {
+        return Err("need at least two activation signals".to_string());
+    }
+
+    let signal_len = signals[0].1.len();
+    if signal_len < 3 {
+        return Err("activation signal too short".to_string());
+    }
+
+    for (idx, signal) in signals {
+        if signal.len() != signal_len {
+            return Err(format!(
+                "signal length mismatch for neuron {}",
+                idx
+            ));
+        }
+    }
+
+    let mut reports = Vec::new();
+    for i in 0..signals.len() {
+        for j in (i + 1)..signals.len() {
+            let (neuron_a, signal_a) = &signals[i];
+            let (neuron_b, signal_b) = &signals[j];
+            let points: Vec<(f64, f64)> = signal_a
+                .iter()
+                .zip(signal_b.iter())
+                .map(|(x, y)| (*x, *y))
+                .collect();
+            let (score, radius_cv, axis_ratio) =
+                match pairwise_circularity_metrics(&points) {
+                    Ok(metrics) => metrics,
+                    Err(_) => (0.0, 1.0, f64::INFINITY),
+                };
+            reports.push(PairwiseManifoldPairReport {
+                neuron_a: *neuron_a,
+                neuron_b: *neuron_b,
+                circularity_score: score,
+                radius_cv,
+                axis_ratio,
+            });
+        }
+    }
+
+    let average_score = reports
+        .iter()
+        .map(|pair| pair.circularity_score)
+        .sum::<f64>()
+        / reports.len() as f64;
+
+    Ok(PairwiseManifoldReport {
+        pair_reports: reports,
+        average_score,
+    })
+}
+
+fn pairwise_circularity_metrics(points: &[(f64, f64)]) -> Result<(f64, f64, f64), String> {
+    if points.len() < 3 {
+        return Err("not enough points for circularity".to_string());
+    }
+
+    let n = points.len() as f64;
+    let mean_x = points.iter().map(|(x, _)| *x).sum::<f64>() / n;
+    let mean_y = points.iter().map(|(_, y)| *y).sum::<f64>() / n;
+
+    let mut var_x = 0.0;
+    let mut var_y = 0.0;
+    let mut cov_xy = 0.0;
+    for (x, y) in points {
+        let dx = x - mean_x;
+        let dy = y - mean_y;
+        var_x += dx * dx;
+        var_y += dy * dy;
+        cov_xy += dx * dy;
+    }
+    var_x /= n;
+    var_y /= n;
+    cov_xy /= n;
+
+    let trace = var_x + var_y;
+    let det = var_x * var_y - cov_xy * cov_xy;
+    if det <= 1.0e-12 || trace <= 0.0 {
+        return Err("degenerate covariance".to_string());
+    }
+
+    let half_trace = trace * 0.5;
+    let disc = (half_trace * half_trace - det).max(0.0).sqrt();
+    let lambda1 = half_trace + disc;
+    let lambda2 = half_trace - disc;
+    if lambda2 <= 0.0 {
+        return Err("degenerate eigenvalues".to_string());
+    }
+
+    let axis_ratio = (lambda1 / lambda2).sqrt();
+
+    let mut v1_x = cov_xy;
+    let mut v1_y = lambda1 - var_x;
+    if v1_x.abs() < 1.0e-12 && v1_y.abs() < 1.0e-12 {
+        v1_x = 1.0;
+        v1_y = 0.0;
+    }
+    let norm = (v1_x * v1_x + v1_y * v1_y).sqrt();
+    v1_x /= norm;
+    v1_y /= norm;
+    let v2_x = -v1_y;
+    let v2_y = v1_x;
+
+    let mut radii = Vec::with_capacity(points.len());
+    for (x, y) in points {
+        let dx = x - mean_x;
+        let dy = y - mean_y;
+        let p1 = dx * v1_x + dy * v1_y;
+        let p2 = dx * v2_x + dy * v2_y;
+        let w1 = p1 / lambda1.sqrt();
+        let w2 = p2 / lambda2.sqrt();
+        radii.push((w1 * w1 + w2 * w2).sqrt());
+    }
+
+    let mean_radius = radii.iter().sum::<f64>() / radii.len() as f64;
+    if mean_radius == 0.0 {
+        return Err("zero mean radius".to_string());
+    }
+
+    let mut variance = 0.0;
+    for r in &radii {
+        let diff = r - mean_radius;
+        variance += diff * diff;
+    }
+    let std = (variance / radii.len() as f64).sqrt();
+    let radius_cv = std / mean_radius;
+    let score = 1.0 / (1.0 + radius_cv);
+
+    Ok((score, radius_cv, axis_ratio))
 }
 
 fn baseline_loss(
@@ -923,5 +1193,76 @@ mod tests {
             verify_mlp_activation_waves_from_signals(&[(0, signal)], &config)
                 .expect_err("expected linear signal to fail");
         assert!(err.contains("dominant frequency ratio") || err.contains("correlation"));
+    }
+
+    #[test]
+    fn pairwise_manifold_transition_passes_on_elliptic_signals() {
+        let n = ModularAdditionDataset::modulus();
+        let freq = 5.0;
+        let mut post_signals = Vec::new();
+        for neuron_idx in 0..7usize {
+            let phase = 2.0 * std::f64::consts::PI * neuron_idx as f64 / 7.0;
+            let signal: Vec<f64> = (0..n)
+                .map(|idx| {
+                    let angle = 2.0 * std::f64::consts::PI * freq * idx as f64 / n as f64 + phase;
+                    angle.sin()
+                })
+                .collect();
+            post_signals.push((neuron_idx, signal));
+        }
+
+        let mut pre_signals = Vec::new();
+        for neuron_idx in 0..7usize {
+            let signal: Vec<f64> = (0..n)
+                .map(|idx| idx as f64 / n as f64 + neuron_idx as f64 * 0.01)
+                .collect();
+            pre_signals.push((neuron_idx, signal));
+        }
+
+        let config = PairwiseManifoldConfig {
+            fixed_y: 0,
+            neuron_indices: (0..7).collect(),
+            min_post_score: 0.75,
+            max_pre_score: 0.55,
+            max_axis_ratio: 8.0,
+            min_pairs_passing: 8,
+        };
+
+        let report = verify_pairwise_manifold_transition_from_signals(
+            &pre_signals,
+            &post_signals,
+            &config,
+        )
+        .expect("expected pairwise manifold transition to pass");
+        assert!(report.passing_pairs >= config.min_pairs_passing);
+    }
+
+    #[test]
+    fn pairwise_manifold_transition_fails_without_rings() {
+        let n = ModularAdditionDataset::modulus();
+        let mut signals = Vec::new();
+        for neuron_idx in 0..7usize {
+            let signal: Vec<f64> = (0..n)
+                .map(|idx| idx as f64 / n as f64 + neuron_idx as f64 * 0.02)
+                .collect();
+            signals.push((neuron_idx, signal));
+        }
+
+        let config = PairwiseManifoldConfig {
+            fixed_y: 0,
+            neuron_indices: (0..7).collect(),
+            min_post_score: 0.8,
+            max_pre_score: 0.55,
+            max_axis_ratio: 4.0,
+            min_pairs_passing: 5,
+        };
+
+        let err = verify_pairwise_manifold_transition_from_signals(
+            &signals,
+            &signals,
+            &config,
+        )
+        .expect_err("expected pairwise manifold transition to fail");
+        assert!(err.contains("post-grok") || err.contains("pre-grok"));
     }
 }
