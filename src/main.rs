@@ -325,6 +325,78 @@ fn main() {
         }
     }
 
+    let pre_checkpoint = Path::new(artifact_dir).join("checkpoint").join("model-1.mpk");
+    let post_checkpoint_grokking = Path::new(artifact_dir)
+        .join("checkpoint_labeled")
+        .join("model-grokking.mpk");
+    let post_checkpoint_final = Path::new(artifact_dir)
+        .join("checkpoint_labeled")
+        .join("model-final.mpk");
+
+    if pre_checkpoint.exists()
+        && (post_checkpoint_grokking.exists() || post_checkpoint_final.exists())
+    {
+        let post_path = if post_checkpoint_grokking.exists() {
+            post_checkpoint_grokking
+        } else {
+            post_checkpoint_final
+        };
+
+        match (
+            checkpoint::load_checkpoint::<MyAutodiffBackend>(
+                pre_checkpoint.to_str().unwrap(),
+                &device,
+            ),
+            checkpoint::load_checkpoint::<MyAutodiffBackend>(post_path.to_str().unwrap(), &device),
+        ) {
+            (Ok(pre_model), Ok(post_model)) => {
+                let manifold_config = verify::PairwiseManifoldConfig::default_for_modulus(
+                    ModularAdditionDataset::modulus(),
+                );
+                match verify::verify_mlp_pairwise_manifold_transition(
+                    &pre_model,
+                    &post_model,
+                    &device,
+                    &manifold_config,
+                ) {
+                    Ok(report) => {
+                        println!(
+                            "✅ Pairwise manifold rings detected (pre avg {:.3}, post avg {:.3}, pairs {}/{})",
+                            report.pre_average_score,
+                            report.post_average_score,
+                            report.passing_pairs,
+                            report.total_pairs
+                        );
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "⚠️  Warning: Pairwise manifold verification failed: {}",
+                            err
+                        );
+                    }
+                }
+            }
+            (Err(err), _) => {
+                eprintln!(
+                    "⚠️  Warning: Could not load pre-grok checkpoint {}: {}",
+                    pre_checkpoint.display(),
+                    err
+                );
+            }
+            (_, Err(err)) => {
+                eprintln!(
+                    "⚠️  Warning: Could not load post-grok checkpoint {}: {}",
+                    post_path.display(),
+                    err
+                );
+            }
+        }
+    } else {
+        eprintln!(
+            "⚠️  Warning: Pairwise manifold verification skipped (missing checkpoints)"
+        );
+    }
+
     // Generate plots
     println!();
     println!("{}", "=".repeat(80));
