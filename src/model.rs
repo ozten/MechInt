@@ -8,6 +8,8 @@ use burn::{
     tensor::{backend::Backend, Int, Tensor},
 };
 
+use crate::data::ModularAdditionDataset;
+
 #[derive(Config, Debug)]
 pub struct TransformerConfig {
     pub vocab_size: usize,
@@ -21,8 +23,8 @@ pub struct TransformerConfig {
 impl Default for TransformerConfig {
     fn default() -> Self {
         Self {
-            vocab_size: 98,       // 0-96 for numbers, 97 for '='
-            seq_length: 3,        // [a, b, =]
+            vocab_size: ModularAdditionDataset::vocab_size(),
+            seq_length: ModularAdditionDataset::sequence_length(),
             d_model: 128,         // embedding dimension
             n_heads: 4,           // attention heads
             d_ff: 512,            // MLP hidden dimension
@@ -221,9 +223,9 @@ mod tests {
         let batch_size = 4;
         let seq_length = 3;
 
-        // Dummy input: [[0, 1, 97], [2, 3, 97], ...]
+        // Dummy input: [[0, 1, 113], [2, 3, 113], ...]
         let input = Tensor::<TestBackend, 2, Int>::from_data(
-            [[0, 1, 97], [2, 3, 97], [5, 10, 97], [20, 30, 97]],
+            [[0, 1, 113], [2, 3, 113], [5, 10, 113], [20, 30, 113]],
             &device,
         );
 
@@ -231,6 +233,6 @@ mod tests {
         let logits = model.forward(input);
 
         // Check output shape: [batch_size, vocab_size]
-        assert_eq!(logits.dims(), [batch_size, 98]);
+        assert_eq!(logits.dims(), [batch_size, ModularAdditionDataset::vocab_size()]);
     }
 }
