@@ -61,3 +61,14 @@
 - All 49 library tests pass
 - Suggestions: wire weight norm tracking into training loop to capture norms at each checkpoint
 
+## [2026-01-07 23:45:00] Completed MechInt-b1p
+- Added FFT dominant frequency verification for embedding analysis
+- Implemented verify_fft_dominant_frequencies_from_embeddings() with 3 key metrics:
+  1. Modulus frequency fraction (checks if p=113 appears significantly)
+  2. Normalized spectrum entropy (detects white noise vs structured peaks)
+  3. Peak-to-median ratio (ensures strong dominant frequencies)
+- Added FFTDominantFrequencyConfig and FFTDominantFrequencyReport structs
+- Added 5 comprehensive unit tests covering pass/fail scenarios
+- All 54 library tests pass
+- Suggestions: wire this verification into post-grokking checkpoint analysis to validate Fourier structure hypothesis
+
