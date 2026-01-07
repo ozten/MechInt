@@ -41,6 +41,10 @@ For the selected task (e.g., bd-X):
    - Suggestions for next tasks
 ```
 
+7. **New tasks and sub-tasks**: 
+If any next tasks were identified, make sure they are track in `bd`.
+File new tasks or sub tasks to this epoc as needed.
+
 ## Stop Conditions
 - Complete exactly ONE task per iteration
 - If task cannot be completed, update it with blockers and move on
