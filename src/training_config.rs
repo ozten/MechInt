@@ -29,7 +29,7 @@ impl Default for TrainingConfig {
             batch_size: 512,
             num_workers: 0,
             seed: 42,
-            num_epochs: 20_000,
+            num_epochs: 3_000,  // ~30k steps; grokking expected at step ~7k (epoch ~700)
             base_learning_rate: 1e-3,
             warmup_steps: 10,
             optimizer: OptimizerSpec::AdamW {
@@ -92,9 +92,9 @@ impl TrainingConfig {
                 self.warmup_steps
             ));
         }
-        if self.num_epochs < 10_000 {
+        if self.num_epochs < 2_000 {
             return Err(format!(
-                "num_epochs must be at least 10000, got {}",
+                "num_epochs must be at least 2000 (gives ~20k steps; grok at step ~7k), got {}",
                 self.num_epochs
             ));
         }
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(config.seed, 42);
         assert_eq!(config.base_learning_rate, 1e-3);
         assert!((10..=50).contains(&config.warmup_steps));
-        assert!(config.num_epochs >= 10_000);
+        assert!(config.num_epochs >= 2_000);
 
         let train_fraction = config.train_fraction();
         assert!((0.3..=0.5).contains(&train_fraction));
@@ -190,10 +190,10 @@ mod tests {
         expect_invalid(config.clone());
 
         config.warmup_steps = 10;
-        config.num_epochs = 5000;
+        config.num_epochs = 1000;
         expect_invalid(config.clone());
 
-        config.num_epochs = 20_000;
+        config.num_epochs = 3_000;
         config.optimizer = OptimizerSpec::AdamW {
             beta_1: 0.8,
             beta_2: 0.98,
