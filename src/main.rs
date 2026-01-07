@@ -6,12 +6,13 @@ mod data;
 mod model;
 mod plotting;
 mod training;
+mod training_config;
 mod verify;
 
 use burn::{
     backend::{wgpu::WgpuDevice, Autodiff, Wgpu},
     data::dataset::Dataset,
-    optim::{lr_scheduler::linear::LinearLrSchedulerConfig, AdamConfig},
+    optim::lr_scheduler::linear::LinearLrSchedulerConfig,
     record::CompactRecorder,
     train::{
         metric::{AccuracyMetric, LossMetric, NumericEntry},
@@ -20,20 +21,29 @@ use burn::{
 };
 use data::{build_dataloaders, ModularAdditionDataset};
 use model::{Transformer, TransformerConfig};
+use training_config::TrainingConfig;
 use std::{fs, path::Path};
 
 type WgpuBackend = Wgpu;
 type MyAutodiffBackend = Autodiff<WgpuBackend>;
 
 fn main() {
+    let training_config = TrainingConfig::default();
+
     println!("🚀 Grokking experiment starting...");
     println!("Configuration:");
     println!("  - Model: 2-layer transformer (4 heads, dim=128, MLP=512)");
-    println!("  - Optimizer: Adam (β1=0.9, β2=0.98, no weight decay)");
-    println!("  - Learning rate: 1e-3 with 10-step linear warmup");
-    println!("  - Batch size: 512");
-    println!("  - Training steps: 100,000 (mapped to epochs)");
-    println!("  - Target: Modular addition (a + b) mod 97");
+    println!("  - Optimizer: AdamW (β1=0.9, β2=0.98, weight decay=1.0)");
+    println!(
+        "  - Learning rate: {} with {}-step linear warmup",
+        training_config.base_learning_rate, training_config.warmup_steps
+    );
+    println!("  - Batch size: {}", training_config.batch_size);
+    println!("  - Training epochs: {}", training_config.num_epochs);
+    println!(
+        "  - Target: Modular addition (a + b) mod {}",
+        ModularAdditionDataset::modulus()
+    );
     println!("  - Tracking: Train/Val Loss AND Accuracy (Burn metrics)");
     println!();
 
@@ -43,8 +53,8 @@ fn main() {
     println!();
 
     // Create datasets
-    let train_dataset = ModularAdditionDataset::new(true, 42);
-    let val_dataset = ModularAdditionDataset::new(false, 42);
+    let train_dataset = ModularAdditionDataset::new(true, training_config.seed);
+    let val_dataset = ModularAdditionDataset::new(false, training_config.seed);
     println!("📊 Dataset sizes:");
     println!("  - Training: {} examples", train_dataset.len());
     println!("  - Validation: {} examples", val_dataset.len());
@@ -55,25 +65,22 @@ fn main() {
     let model: Transformer<MyAutodiffBackend> = config.init(&device);
     println!("✅ Model initialized");
 
-    // Setup optimizer to match paper (Figure 1: Adam without weight decay, β2=0.98)
-    let optim_config = AdamConfig::new()
-        .with_beta_1(0.9)
-        .with_beta_2(0.98)  // Paper uses 0.98, not default 0.999
-        .with_epsilon(1e-8);
+    // Setup optimizer to match paper (AdamW with high weight decay, β2=0.98)
+    let optim_config = training_config.optimizer_config();
     let optim = optim_config.init();
-    println!("✅ Adam optimizer initialized (β1=0.9, β2=0.98, no weight decay)");
+    println!("✅ AdamW optimizer initialized (β1=0.9, β2=0.98, weight decay=1.0)");
     println!();
 
     // Training configuration (matching paper)
-    let batch_size = 512;
-    let num_workers = 0;
-    let seed = 42;
-    let max_steps = 100_000; // Paper uses 1e5-1e6, running 100k (~1 hour)
-    let base_learning_rate = 1e-3;
-    let warmup_steps = 10; // Paper uses linear warmup over 10 updates
+    let batch_size = training_config.batch_size;
+    let num_workers = training_config.num_workers;
+    let seed = training_config.seed;
+    let num_epochs = training_config.num_epochs;
+    let base_learning_rate = training_config.base_learning_rate;
+    let warmup_steps = training_config.warmup_steps;
 
-    let steps_per_epoch = (train_dataset.len() + batch_size - 1) / batch_size;
-    let num_epochs = (max_steps + steps_per_epoch - 1) / steps_per_epoch;
+    let steps_per_epoch = training_config.steps_per_epoch(train_dataset.len());
+    let total_steps = training_config.total_steps(train_dataset.len());
 
     let artifact_dir = "artifacts";
     std::fs::create_dir_all(artifact_dir).ok();
@@ -94,7 +101,7 @@ fn main() {
     println!(
         "🏋️  Starting training for {} epochs (~{} steps)...",
         num_epochs,
-        num_epochs * steps_per_epoch
+        total_steps
     );
     println!("{}", "=".repeat(80));
     println!();
@@ -112,6 +119,24 @@ fn main() {
 
     let (loss_history, accuracy_history) =
         load_metric_history(artifact_dir, num_epochs, steps_per_epoch);
+
+    let grokking_config =
+        verify::GrokkingVerificationConfig::default_for_modulus(ModularAdditionDataset::modulus());
+    match verify::verify_grokking_phase_transition(
+        &loss_history,
+        &accuracy_history,
+        &grokking_config,
+    ) {
+        Ok(report) => {
+            println!(
+                "✅ Grokking phase transition detected (train>99% at step {}, val>99% at step {})",
+                report.early_train_step, report.transition_step
+            );
+        }
+        Err(err) => {
+            eprintln!("⚠️  Warning: Grokking phase verification failed: {}", err);
+        }
+    }
 
     if let Some(epoch) = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0) {
         if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
