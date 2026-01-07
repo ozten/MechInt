@@ -2,6 +2,7 @@ use burn::{
     data::dataset::Dataset,
     tensor::{backend::Backend, Int, Tensor},
 };
+use rustfft::{num_complex::Complex, FftPlanner};
 
 use crate::analysis::{AccuracyHistory, LossHistory};
 use crate::data::ModularAdditionDataset;
@@ -68,6 +69,29 @@ pub struct ExcludedLossSpikeReport {
     pub spike_step: usize,
     pub spike_loss: f64,
     pub baseline_loss: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MlpWaveVerificationConfig {
+    pub max_negative_fraction: f64,
+    pub negative_tolerance: f64,
+    pub min_dominant_ratio: f64,
+    pub min_correlation: f64,
+    pub phase_steps: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MlpWaveNeuronReport {
+    pub neuron_index: usize,
+    pub dominant_frequency: usize,
+    pub dominant_ratio: f64,
+    pub negative_fraction: f64,
+    pub best_correlation: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MlpWaveReport {
+    pub neuron_reports: Vec<MlpWaveNeuronReport>,
 }
 
 pub fn verify_grokking_phase_transition(
@@ -250,6 +274,54 @@ pub fn verify_excluded_loss_spike(
     })
 }
 
+pub fn verify_mlp_activation_waves<B: Backend>(
+    model: &Transformer<B>,
+    device: &B::Device,
+    fixed_y: usize,
+    neuron_indices: &[usize],
+    config: &MlpWaveVerificationConfig,
+) -> Result<MlpWaveReport, String> {
+    let activations = collect_mlp_post_relu_activations(model, device, fixed_y)?;
+    if neuron_indices.is_empty() {
+        return Err("neuron indices list is empty".to_string());
+    }
+
+    let d_ff = activations.len();
+    for &idx in neuron_indices {
+        if idx >= d_ff {
+            return Err(format!(
+                "neuron index {} out of range (d_ff={})",
+                idx, d_ff
+            ));
+        }
+    }
+
+    let signals: Vec<(usize, Vec<f64>)> = neuron_indices
+        .iter()
+        .map(|&idx| (idx, activations[idx].clone()))
+        .collect();
+    verify_mlp_activation_waves_from_signals(&signals, config)
+}
+
+pub fn verify_mlp_activation_waves_from_signals(
+    signals: &[(usize, Vec<f64>)],
+    config: &MlpWaveVerificationConfig,
+) -> Result<MlpWaveReport, String> {
+    if signals.is_empty() {
+        return Err("no activation signals provided".to_string());
+    }
+
+    let mut reports = Vec::with_capacity(signals.len());
+    for (neuron_index, signal) in signals {
+        let report = analyze_mlp_activation_wave(*neuron_index, signal, config)?;
+        reports.push(report);
+    }
+
+    Ok(MlpWaveReport {
+        neuron_reports: reports,
+    })
+}
+
 fn baseline_loss(
     losses: &[(usize, f64)],
     plateau_min_step: usize,
@@ -281,6 +353,188 @@ fn find_drop_step(
         .find(|(_, loss)| *loss <= baseline * (1.0 - drop_fraction))
         .map(|(step, _)| *step)
         .ok_or_else(|| "loss never drops below threshold".to_string())
+}
+
+fn collect_mlp_post_relu_activations<B: Backend>(
+    model: &Transformer<B>,
+    device: &B::Device,
+    fixed_y: usize,
+) -> Result<Vec<Vec<f64>>, String> {
+    let modulus = ModularAdditionDataset::modulus();
+    let equals_token = ModularAdditionDataset::equals_token();
+
+    let mut inputs_vec = Vec::with_capacity(modulus * 3);
+    for x in 0..modulus {
+        inputs_vec.push(x as i32);
+        inputs_vec.push(fixed_y as i32);
+        inputs_vec.push(equals_token as i32);
+    }
+
+    let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
+        .reshape([modulus, 3]);
+    let (_, mlp_acts) = model.forward_with_mlp_activations(inputs);
+    let [batch_size, d_ff] = mlp_acts.dims();
+
+    if batch_size != modulus {
+        return Err(format!(
+            "unexpected activation batch size {} (expected {})",
+            batch_size, modulus
+        ));
+    }
+
+    let data: Vec<f32> = mlp_acts.into_data().to_vec().unwrap();
+    let mut per_neuron = vec![Vec::with_capacity(batch_size); d_ff];
+    for batch in 0..batch_size {
+        for neuron in 0..d_ff {
+            let idx = batch * d_ff + neuron;
+            per_neuron[neuron].push(data[idx] as f64);
+        }
+    }
+
+    Ok(per_neuron)
+}
+
+fn analyze_mlp_activation_wave(
+    neuron_index: usize,
+    signal: &[f64],
+    config: &MlpWaveVerificationConfig,
+) -> Result<MlpWaveNeuronReport, String> {
+    if signal.len() < 3 {
+        return Err(format!(
+            "activation signal for neuron {} is too short",
+            neuron_index
+        ));
+    }
+
+    let negative_count = signal
+        .iter()
+        .filter(|value| **value < -config.negative_tolerance)
+        .count();
+    let negative_fraction = negative_count as f64 / signal.len() as f64;
+    if negative_fraction > config.max_negative_fraction {
+        return Err(format!(
+            "neuron {} has {:.3} negative activations",
+            neuron_index, negative_fraction
+        ));
+    }
+
+    let (dominant_frequency, dominant_ratio) = dominant_frequency_ratio(signal)?;
+    if dominant_ratio < config.min_dominant_ratio {
+        return Err(format!(
+            "neuron {} dominant frequency ratio {:.3} below threshold {:.3}",
+            neuron_index, dominant_ratio, config.min_dominant_ratio
+        ));
+    }
+
+    let best_correlation =
+        best_rectified_sine_correlation(signal, dominant_frequency, config.phase_steps);
+    if best_correlation < config.min_correlation {
+        return Err(format!(
+            "neuron {} rectified sine correlation {:.3} below threshold {:.3}",
+            neuron_index, best_correlation, config.min_correlation
+        ));
+    }
+
+    Ok(MlpWaveNeuronReport {
+        neuron_index,
+        dominant_frequency,
+        dominant_ratio,
+        negative_fraction,
+        best_correlation,
+    })
+}
+
+fn dominant_frequency_ratio(signal: &[f64]) -> Result<(usize, f64), String> {
+    if signal.len() < 2 {
+        return Err("signal too short for FFT".to_string());
+    }
+
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(signal.len());
+    let mut buffer: Vec<Complex<f64>> = signal
+        .iter()
+        .map(|&x| Complex::new(x, 0.0))
+        .collect();
+    fft.process(&mut buffer);
+    let magnitudes: Vec<f64> = buffer.iter().map(|c| c.norm()).collect();
+
+    if magnitudes.len() < 2 {
+        return Err("insufficient FFT bins".to_string());
+    }
+
+    let mut dominant_idx = 1usize;
+    let mut dominant_mag = magnitudes[1];
+    for (idx, &mag) in magnitudes.iter().enumerate().skip(2) {
+        if mag > dominant_mag {
+            dominant_mag = mag;
+            dominant_idx = idx;
+        }
+    }
+
+    if dominant_idx == 0 {
+        return Err("dominant frequency is zero".to_string());
+    }
+
+    let mut nonzero = magnitudes[1..].to_vec();
+    nonzero.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_mag = nonzero[nonzero.len() / 2];
+    let ratio = if median_mag == 0.0 {
+        dominant_mag
+    } else {
+        dominant_mag / median_mag
+    };
+
+    Ok((dominant_idx, ratio))
+}
+
+fn best_rectified_sine_correlation(signal: &[f64], frequency: usize, phase_steps: usize) -> f64 {
+    if signal.is_empty() || frequency == 0 || phase_steps == 0 {
+        return 0.0;
+    }
+
+    let tau = std::f64::consts::PI * 2.0;
+    let mut best = -1.0;
+    for step in 0..phase_steps {
+        let phase = tau * step as f64 / phase_steps as f64;
+        let wave: Vec<f64> = (0..signal.len())
+            .map(|idx| {
+                let angle = tau * frequency as f64 * idx as f64 / signal.len() as f64 + phase;
+                angle.sin().max(0.0)
+            })
+            .collect();
+        let corr = pearson_correlation(signal, &wave);
+        if corr > best {
+            best = corr;
+        }
+    }
+
+    best
+}
+
+fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+
+    let mean_a = a.iter().sum::<f64>() / a.len() as f64;
+    let mean_b = b.iter().sum::<f64>() / b.len() as f64;
+
+    let mut num = 0.0;
+    let mut denom_a = 0.0;
+    let mut denom_b = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let da = x - mean_a;
+        let db = y - mean_b;
+        num += da * db;
+        denom_a += da * da;
+        denom_b += db * db;
+    }
+
+    if denom_a == 0.0 || denom_b == 0.0 {
+        return 0.0;
+    }
+
+    num / (denom_a.sqrt() * denom_b.sqrt())
 }
 
 /// Verify that the model actually learned modular addition
@@ -529,5 +783,53 @@ mod tests {
         let err = verify_excluded_loss_spike(&excluded_loss, &config)
             .expect_err("expected excluded loss spike verification to fail");
         assert!(err.contains("excluded loss spike too small"));
+    }
+
+    #[test]
+    fn mlp_activation_wave_verification_passes_on_rectified_sine() {
+        let n = ModularAdditionDataset::modulus();
+        let freq = 5.0;
+        let mut signal = Vec::with_capacity(n);
+        for idx in 0..n {
+            let angle = 2.0 * std::f64::consts::PI * freq * idx as f64 / n as f64;
+            let rectified = angle.sin().max(0.0);
+            let wobble = (2.0 * std::f64::consts::PI * 2.0 * idx as f64 / n as f64)
+                .sin()
+                .abs()
+                * 0.02;
+            signal.push(rectified + wobble);
+        }
+
+        let config = MlpWaveVerificationConfig {
+            max_negative_fraction: 0.0,
+            negative_tolerance: 1e-6,
+            min_dominant_ratio: 3.0,
+            min_correlation: 0.7,
+            phase_steps: 32,
+        };
+
+        let report =
+            verify_mlp_activation_waves_from_signals(&[(0, signal)], &config)
+                .expect("expected rectified sine to pass");
+        assert_eq!(report.neuron_reports.len(), 1);
+    }
+
+    #[test]
+    fn mlp_activation_wave_verification_fails_on_noise() {
+        let n = ModularAdditionDataset::modulus();
+        let signal: Vec<f64> = (0..n).map(|idx| idx as f64 / n as f64).collect();
+
+        let config = MlpWaveVerificationConfig {
+            max_negative_fraction: 0.0,
+            negative_tolerance: 1e-6,
+            min_dominant_ratio: 4.0,
+            min_correlation: 0.8,
+            phase_steps: 16,
+        };
+
+        let err =
+            verify_mlp_activation_waves_from_signals(&[(0, signal)], &config)
+                .expect_err("expected linear signal to fail");
+        assert!(err.contains("dominant frequency ratio") || err.contains("correlation"));
     }
 }

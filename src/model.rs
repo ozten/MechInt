@@ -181,6 +181,45 @@ impl<B: Backend> Transformer<B> {
         // Project to vocabulary
         self.lm_head.forward(last_hidden)
     }
+
+    /// Forward pass that also returns post-ReLU MLP activations for the final token.
+    pub fn forward_with_mlp_activations(
+        &self,
+        x: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
+        let [batch_size, seq_length] = x.dims();
+        let device = x.device();
+
+        let tok_emb = self.token_embedding.forward(x);
+
+        let positions = Tensor::arange(0..seq_length as i64, &device)
+            .reshape([1, seq_length])
+            .repeat(&[batch_size, 1]);
+        let pos_emb = self.position_embedding.forward(positions);
+
+        let mut hidden = tok_emb + pos_emb;
+
+        let attn_mask = generate_autoregressive_mask::<B>(batch_size, seq_length, &device);
+
+        let mut last_mlp_acts: Option<Tensor<B, 3>> = None;
+        for layer in &self.layers {
+            let (next_hidden, mlp_acts) = layer.forward_with_mlp_activations(hidden, &attn_mask);
+            hidden = next_hidden;
+            last_mlp_acts = Some(mlp_acts);
+        }
+
+        let mlp_acts = last_mlp_acts.expect("transformer must have at least one layer");
+        let last_mlp = mlp_acts
+            .slice([0..batch_size, (seq_length - 1)..seq_length])
+            .squeeze();
+
+        let last_hidden = hidden
+            .slice([0..batch_size, (seq_length - 1)..seq_length])
+            .squeeze();
+
+        let logits = self.lm_head.forward(last_hidden);
+        (logits, last_mlp)
+    }
 }
 
 impl<B: Backend> TransformerLayer<B> {
@@ -203,6 +242,19 @@ impl<B: Backend> TransformerLayer<B> {
         let mlp_out = self.mlp.forward(x.clone());
         x + mlp_out
     }
+
+    fn forward_with_mlp_activations(
+        &self,
+        x: Tensor<B, 3>,
+        attn_mask: &Tensor<B, 3, Bool>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let mha_input = MhaInput::self_attn(x.clone()).mask_attn(attn_mask.clone());
+        let mha_output = self.attention.forward(mha_input);
+        let x = x + mha_output.context;
+
+        let (mlp_out, mlp_acts) = self.mlp.forward_with_activations(x.clone());
+        (x + mlp_out, mlp_acts)
+    }
 }
 
 impl<B: Backend> MLP<B> {
@@ -218,6 +270,13 @@ impl<B: Backend> MLP<B> {
         let x = self.fc1.forward(x);
         let x = self.activation.forward(x);
         self.fc2.forward(x)
+    }
+
+    fn forward_with_activations(&self, x: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let x = self.fc1.forward(x);
+        let acts = self.activation.forward(x);
+        let out = self.fc2.forward(acts.clone());
+        (out, acts)
     }
 }
 
