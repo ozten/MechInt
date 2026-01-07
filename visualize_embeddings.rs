@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Generate 7×7 grid visualization
                 let output_path = format!("embeddings/embedding_grid_{}.png", label);
                 println!("   🎨 Generating 7×7 grid...");
-                plotting::plot_embedding_grid(&embeddings, &dimensions, &output_path, &title)?;
+                plotting::plot_embedding_grid_fast(&embeddings, &dimensions, &output_path, &title)?;
 
                 println!("   ✅ Visualization complete!");
                 println!();
