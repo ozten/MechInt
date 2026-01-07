@@ -192,6 +192,31 @@ impl SnakeCurveConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct WeightNormDecayConfig {
+    pub min_relative_decrease: f64,
+    pub plateau_min_step: usize,
+    pub grok_step_window: usize,
+}
+
+impl WeightNormDecayConfig {
+    pub fn default_for_grokking() -> Self {
+        Self {
+            min_relative_decrease: 0.1,
+            plateau_min_step: 1000,
+            grok_step_window: 500,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WeightNormDecayReport {
+    pub initial_norm: f64,
+    pub final_norm: f64,
+    pub relative_decrease: f64,
+    pub grok_step_norm: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SnakeCurveReport {
     pub train_converged_by_step: usize,
     pub val_plateau_max_acc: f32,
@@ -1194,6 +1219,74 @@ fn test_all_examples<B: Backend>(
     total_correct as f32 / total as f32
 }
 
+/// Verify that weight norms decrease over time with weight decay
+/// and show correlation with the grokking transition
+pub fn verify_weight_norm_decay(
+    weight_norm_history: &[(usize, f64)],
+    grok_step: Option<usize>,
+    config: &WeightNormDecayConfig,
+) -> Result<WeightNormDecayReport, String> {
+    if weight_norm_history.len() < 2 {
+        return Err("weight norm history requires at least 2 snapshots".to_string());
+    }
+
+    let initial_norm = weight_norm_history
+        .first()
+        .ok_or_else(|| "weight norm history is empty".to_string())?
+        .1;
+    let final_norm = weight_norm_history
+        .last()
+        .ok_or_else(|| "weight norm history is empty".to_string())?
+        .1;
+
+    if initial_norm <= 0.0 {
+        return Err("initial weight norm must be positive".to_string());
+    }
+
+    // Check that norms are generally decreasing (with weight decay)
+    let relative_decrease = (initial_norm - final_norm) / initial_norm;
+    if relative_decrease < config.min_relative_decrease {
+        return Err(format!(
+            "weight norm decrease {:.4} below threshold {:.4} (initial {:.4}, final {:.4})",
+            relative_decrease, config.min_relative_decrease, initial_norm, final_norm
+        ));
+    }
+
+    // Check that norms are not increasing (weight decay should monotonically decrease norms)
+    for window in weight_norm_history.windows(2) {
+        let prev_norm = window[0].1;
+        let next_norm = window[1].1;
+        if next_norm > prev_norm * 1.01 {
+            // Allow 1% tolerance for numerical noise
+            return Err(format!(
+                "weight norm increased from {:.4} to {:.4} at step {}",
+                prev_norm, next_norm, window[1].0
+            ));
+        }
+    }
+
+    // If grok step is provided, check that norms show a shift around grokking
+    let grok_step_norm = if let Some(step) = grok_step {
+        weight_norm_history
+            .iter()
+            .filter(|(s, _)| {
+                *s >= step.saturating_sub(config.grok_step_window)
+                    && *s <= step + config.grok_step_window
+            })
+            .map(|(_, norm)| *norm)
+            .next()
+    } else {
+        None
+    };
+
+    Ok(WeightNormDecayReport {
+        initial_norm,
+        final_norm,
+        relative_decrease,
+        grok_step_norm,
+    })
+}
+
 /// Verify the characteristic "snake curve" shape of grokking phenomenon
 /// on log-scale plots: train accuracy rises early, validation stays flat then jumps
 pub fn verify_snake_curve_shape(
@@ -1883,5 +1976,124 @@ mod tests {
         // Should fail because val jumps before train converges (not a proper snake curve)
         // This can fail for multiple reasons, but should definitely fail
         assert!(result.is_err(), "Expected snake curve verification to fail but it passed");
+    }
+
+    #[test]
+    fn weight_norm_decay_verification_passes_on_decreasing_norms() {
+        let weight_norms = vec![
+            (0, 100.0),
+            (500, 85.0),
+            (1000, 72.0),
+            (1500, 63.0),
+            (2000, 58.0),
+            (2500, 55.0),
+        ];
+
+        let config = WeightNormDecayConfig {
+            min_relative_decrease: 0.1,
+            plateau_min_step: 1000,
+            grok_step_window: 500,
+        };
+
+        let report = verify_weight_norm_decay(&weight_norms, Some(2000), &config)
+            .expect("expected weight norm decay verification to pass");
+
+        assert_eq!(report.initial_norm, 100.0);
+        assert_eq!(report.final_norm, 55.0);
+        assert!((report.relative_decrease - 0.45).abs() < 0.01);
+        assert!(report.grok_step_norm.is_some());
+    }
+
+    #[test]
+    fn weight_norm_decay_verification_fails_on_flat_norms() {
+        let weight_norms = vec![
+            (0, 100.0),
+            (500, 99.0),
+            (1000, 98.5),
+            (1500, 98.0),
+            (2000, 97.5),
+        ];
+
+        let config = WeightNormDecayConfig {
+            min_relative_decrease: 0.1,
+            plateau_min_step: 1000,
+            grok_step_window: 500,
+        };
+
+        let err = verify_weight_norm_decay(&weight_norms, None, &config)
+            .expect_err("expected weight norm decay verification to fail");
+        assert!(err.contains("weight norm decrease"));
+    }
+
+    #[test]
+    fn weight_norm_decay_verification_fails_on_increasing_norms() {
+        let weight_norms = vec![
+            (0, 100.0),
+            (500, 95.0),
+            (1000, 105.0), // Increase here
+            (1500, 90.0),
+            (2000, 85.0),
+        ];
+
+        let config = WeightNormDecayConfig {
+            min_relative_decrease: 0.1,
+            plateau_min_step: 1000,
+            grok_step_window: 500,
+        };
+
+        let err = verify_weight_norm_decay(&weight_norms, None, &config)
+            .expect_err("expected weight norm decay verification to fail");
+        assert!(err.contains("weight norm increased"));
+    }
+
+    #[test]
+    fn weight_norm_decay_verification_allows_small_noise() {
+        // Weight decay with small numerical noise (within 1% tolerance)
+        let weight_norms = vec![
+            (0, 100.0),
+            (500, 95.0),
+            (1000, 90.5),  // Small increase within tolerance
+            (1500, 90.0),
+            (2000, 85.0),
+        ];
+
+        let config = WeightNormDecayConfig {
+            min_relative_decrease: 0.1,
+            plateau_min_step: 1000,
+            grok_step_window: 500,
+        };
+
+        let report = verify_weight_norm_decay(&weight_norms, None, &config)
+            .expect("expected weight norm decay with small noise to pass");
+
+        assert_eq!(report.initial_norm, 100.0);
+        assert_eq!(report.final_norm, 85.0);
+        assert!((report.relative_decrease - 0.15).abs() < 0.01);
+    }
+
+    #[test]
+    fn weight_norm_decay_verification_finds_grok_step_norm() {
+        let weight_norms = vec![
+            (0, 100.0),
+            (1000, 80.0),
+            (1800, 68.0),  // Within window of grok step (2200 - 500 = 1700)
+            (2000, 65.0),
+            (2200, 62.0),  // Around grok step
+            (3000, 55.0),
+        ];
+
+        let config = WeightNormDecayConfig {
+            min_relative_decrease: 0.1,
+            plateau_min_step: 1000,
+            grok_step_window: 500,
+        };
+
+        let report = verify_weight_norm_decay(&weight_norms, Some(2200), &config)
+            .expect("expected weight norm decay verification to pass");
+
+        assert!(report.grok_step_norm.is_some());
+        let grok_norm = report.grok_step_norm.unwrap();
+        // Should find the first norm in the window [1700, 2700], which is 68.0 at step 1800
+        assert!((grok_norm - 68.0).abs() < 0.01);
     }
 }
