@@ -24,3 +24,8 @@
 - Added MLP post-ReLU activation capture and rectified-sine verification via FFT/correlation metrics
 - Added synthetic verification tests for rectified sine pass and noise failure cases
 - Suggestions: wire MLP activation verification into training analysis runs post-grok
+
+## [2026-01-07 22:19:58] Completed MechInt-e78
+- Added grokking-spec validation for training hyperparameters and wired it into startup
+- Expanded training config tests to flag deviations from required optimizer and schedule values
+- Suggestions: extend validation to any CLI/config overrides if added later
