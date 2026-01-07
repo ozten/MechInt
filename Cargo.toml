@@ -15,6 +15,10 @@ path = "generate_figures.rs"
 name = "visualize_embeddings"
 path = "visualize_embeddings.rs"
 
+[[bin]]
+name = "test_embedding_viz"
+path = "test_embedding_viz.rs"
+
 [dependencies]
 burn = { version = "0.16", features = ["train", "wgpu", "autodiff", "ndarray"] }
 rand = "0.8"
@@ -22,3 +26,5 @@ rustfft = "6.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 plotters = "0.3"
+image = "0.24"
+imageproc = "0.23"

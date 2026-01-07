@@ -49,10 +49,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ];
                 println!("      Selected dimensions: {:?}", dimensions);
 
-                // Generate 7×7 grid visualization
+                // Generate 7×7 grid visualization (FAST version)
                 let output_path = format!("embeddings/embedding_grid_{}.png", label);
-                println!("   🎨 Generating 7×7 grid...");
-                plotting::plot_embedding_grid(&embeddings, &dimensions, &output_path, title)?;
+                println!("   🎨 Generating 7×7 grid (fast pixel rendering)...");
+                plotting::plot_embedding_grid_fast(&embeddings, &dimensions, &output_path, title)?;
 
                 println!("   ✅ Visualization complete!");
                 println!();

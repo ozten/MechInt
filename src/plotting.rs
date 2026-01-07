@@ -1,5 +1,7 @@
 use plotters::prelude::*;
 use std::collections::HashMap;
+use image::{ImageBuffer, Rgb, RgbImage};
+use imageproc::drawing::{draw_filled_circle_mut, draw_line_segment_mut};
 
 /// Viridis colormap - maps value in [0, 1] to RGB
 fn viridis_color(t: f64) -> RGBColor {
@@ -711,28 +713,32 @@ pub fn plot_grokking_combined_logscale(
     Ok(())
 }
 
-/// Plot 7×7 embedding analysis grid
+/// Plot 3×3 embedding analysis grid (faster version)
 /// embeddings: [p, d] matrix where p=97 (number of tokens), d=embedding_dim
-/// dimensions: indices of 7 embedding dimensions to visualize
-pub fn plot_embedding_grid(
+/// dimensions: indices of 3 embedding dimensions to visualize
+pub fn plot_embedding_grid_3x3(
     embeddings: &[Vec<f64>],
-    dimensions: &[usize; 7],
+    dimensions: &[usize; 3],
     output_path: &str,
     title: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let p = embeddings.len(); // number of tokens (97)
-    let point_size = 2; // small point size
+    let p = embeddings.len(); // number of tokens
+    let point_size = 3; // slightly larger for visibility
 
-    // Create large canvas for 7×7 grid
-    let root = BitMapBackend::new(output_path, (2100, 2100)).into_drawing_area();
+    // Create canvas for 3×3 grid
+    let root = BitMapBackend::new(output_path, (1200, 1200)).into_drawing_area();
     root.fill(&BLACK)?; // Black background
 
-    // Split into 7×7 grid
-    let cell_areas = root.split_evenly((7, 7));
+    // Split into 3×3 grid
+    let cell_areas = root.split_evenly((3, 3));
 
-    for row in 0..7 {
-        for col in 0..7 {
-            let idx = row * 7 + col;
+    println!("   Rendering 3×3 grid ({} cells)...", 9);
+    for row in 0..3 {
+        for col in 0..3 {
+            let idx = row * 3 + col;
+            print!(".");
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
             let area = &cell_areas[idx];
 
             if col == 0 {
@@ -766,10 +772,10 @@ pub fn plot_embedding_grid(
                     .draw()?;
 
                 // Plot points colored by token value
-                for (token, value) in values {
-                    let color = token_color(token, p);
+                for (token, value) in values.iter() {
+                    let color = token_color(*token, p);
                     chart.draw_series(std::iter::once(Circle::new(
-                        (token, value),
+                        (*token, *value),
                         point_size,
                         color.filled(),
                     )))?;
@@ -823,9 +829,10 @@ pub fn plot_embedding_grid(
         }
     }
 
+    println!(); // newline after progress dots
     root.present()?;
-    println!("📊 Embedding grid plot saved to: {}", output_path);
-    println!("   Title: {}", title);
+    println!("   📊 Embedding grid plot saved to: {}", output_path);
+    println!("      Title: {}", title);
     Ok(())
 }
 
@@ -856,4 +863,196 @@ pub fn select_interesting_dimensions(embeddings: &[Vec<f64>], n: usize) -> Vec<u
 
     // Take top n dimensions
     variances.iter().take(n).map(|(dim, _)| *dim).collect()
+}
+
+/// Convert viridis color to image::Rgb
+fn viridis_to_rgb(t: f64) -> Rgb<u8> {
+    let color = viridis_color(t);
+    Rgb([color.0, color.1, color.2])
+}
+
+/// Map token value to RGB color
+fn token_to_rgb(token_value: usize, p: usize) -> Rgb<u8> {
+    let t = token_value as f64 / (p - 1) as f64;
+    viridis_to_rgb(t)
+}
+
+/// Fast 7×7 embedding grid using direct pixel manipulation
+pub fn plot_embedding_grid_fast(
+    embeddings: &[Vec<f64>],
+    dimensions: &[usize; 7],
+    output_path: &str,
+    title: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let p = embeddings.len(); // number of tokens
+    let cell_size: usize = 300; // pixels per cell
+    let grid_size: usize = 7;
+    let total_size = cell_size * grid_size;
+
+    println!("   🎨 Creating {}×{} pixel canvas...", total_size, total_size);
+    let mut img: RgbImage = ImageBuffer::from_pixel(total_size as u32, total_size as u32, Rgb([0, 0, 0]));
+
+    println!("   🖌️  Rendering {} cells...", grid_size * grid_size);
+
+    for row in 0..grid_size as usize {
+        for col in 0..grid_size as usize {
+            let cell_idx = row * grid_size as usize + col;
+            if cell_idx % 10 == 0 {
+                print!(".");
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+            }
+
+            let x_offset = col * cell_size as usize;
+            let y_offset = row * cell_size as usize;
+
+            if col == 0 {
+                // First column: dimension vs token index
+                let dim = dimensions[row];
+                render_dimension_plot(
+                    &mut img,
+                    embeddings,
+                    dim,
+                    p,
+                    x_offset,
+                    y_offset,
+                    cell_size,
+                );
+            } else {
+                // Pairwise scatter plot
+                let dim_x = dimensions[col];
+                let dim_y = dimensions[row];
+                render_scatter_plot(
+                    &mut img,
+                    embeddings,
+                    dim_x,
+                    dim_y,
+                    p,
+                    x_offset,
+                    y_offset,
+                    cell_size,
+                );
+            }
+        }
+    }
+
+    println!(); // newline after progress dots
+    println!("   💾 Saving image to {}...", output_path);
+    img.save(output_path)?;
+    println!("   ✅ Embedding grid saved!");
+    println!("      Title: {}", title);
+    Ok(())
+}
+
+/// Render dimension vs index plot into a cell
+fn render_dimension_plot(
+    img: &mut RgbImage,
+    embeddings: &[Vec<f64>],
+    dim: usize,
+    p: usize,
+    x_offset: usize,
+    y_offset: usize,
+    cell_size: usize,
+) {
+    // Find min/max for this dimension
+    let values: Vec<f64> = (0..p).map(|token| embeddings[token][dim]).collect();
+    let min_val = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_val = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let range = max_val - min_val;
+
+    if range == 0.0 {
+        return; // Skip if no variation
+    }
+
+    let margin = 20;
+    let plot_width = cell_size - 2 * margin;
+    let plot_height = cell_size - 2 * margin;
+
+    // Draw subtle crosshairs
+    let mid_x = (x_offset + cell_size / 2) as f32;
+    let mid_y = (y_offset + cell_size / 2) as f32;
+    let gray = Rgb([30, 30, 30]);
+    draw_line_segment_mut(
+        img,
+        ((x_offset + margin) as f32, mid_y),
+        ((x_offset + cell_size - margin) as f32, mid_y),
+        gray,
+    );
+    draw_line_segment_mut(
+        img,
+        (mid_x, (y_offset + margin) as f32),
+        (mid_x, (y_offset + cell_size - margin) as f32),
+        gray,
+    );
+
+    // Plot points
+    for token in 0..p {
+        let x = x_offset + margin + (token * plot_width / p);
+        let normalized = (values[token] - min_val) / range;
+        let y = y_offset + cell_size - margin - (normalized * plot_height as f64) as usize;
+
+        let color = token_to_rgb(token, p);
+        draw_filled_circle_mut(img, (x as i32, y as i32), 2, color);
+    }
+}
+
+/// Render scatter plot into a cell
+fn render_scatter_plot(
+    img: &mut RgbImage,
+    embeddings: &[Vec<f64>],
+    dim_x: usize,
+    dim_y: usize,
+    p: usize,
+    x_offset: usize,
+    y_offset: usize,
+    cell_size: usize,
+) {
+    // Find min/max for both dimensions
+    let values_x: Vec<f64> = (0..p).map(|token| embeddings[token][dim_x]).collect();
+    let values_y: Vec<f64> = (0..p).map(|token| embeddings[token][dim_y]).collect();
+
+    let min_x = values_x.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_x = values_x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min_y = values_y.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_y = values_y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let range_x = max_x - min_x;
+    let range_y = max_y - min_y;
+
+    if range_x == 0.0 || range_y == 0.0 {
+        return; // Skip if no variation
+    }
+
+    let margin = 20;
+    let plot_width = cell_size - 2 * margin;
+    let plot_height = cell_size - 2 * margin;
+
+    // Draw subtle crosshairs at origin
+    let mid_x = (x_offset + cell_size / 2) as f32;
+    let mid_y = (y_offset + cell_size / 2) as f32;
+    let gray = Rgb([30, 30, 30]);
+    draw_line_segment_mut(
+        img,
+        ((x_offset + margin) as f32, mid_y),
+        ((x_offset + cell_size - margin) as f32, mid_y),
+        gray,
+    );
+    draw_line_segment_mut(
+        img,
+        (mid_x, (y_offset + margin) as f32),
+        (mid_x, (y_offset + cell_size - margin) as f32),
+        gray,
+    );
+
+    // Plot points
+    for token in 0..p {
+        let norm_x = (values_x[token] - min_x) / range_x;
+        let norm_y = (values_y[token] - min_y) / range_y;
+
+        let x = x_offset + margin + (norm_x * plot_width as f64) as usize;
+        let y = y_offset + cell_size - margin - (norm_y * plot_height as f64) as usize;
+
+        let color = token_to_rgb(token, p);
+        draw_filled_circle_mut(img, (x as i32, y as i32), 2, color);
+    }
 }
