@@ -512,6 +512,154 @@ pub fn extract_all_embeddings<B: Backend>(model: &Transformer<B>) -> Vec<Vec<f64
     embeddings
 }
 
+/// Verify that FFT analysis of embeddings shows dominant frequencies
+/// that align with the modulus structure and nontrivial spectral patterns
+pub fn verify_fft_dominant_frequencies<B: Backend>(
+    model: &Transformer<B>,
+    config: &FFTDominantFrequencyConfig,
+) -> Result<FFTDominantFrequencyReport, String> {
+    let embeddings = extract_all_embeddings(model);
+    verify_fft_dominant_frequencies_from_embeddings(&embeddings, config)
+}
+
+/// Verify FFT dominant frequencies from pre-extracted embeddings
+pub fn verify_fft_dominant_frequencies_from_embeddings(
+    embeddings: &[Vec<f64>],
+    config: &FFTDominantFrequencyConfig,
+) -> Result<FFTDominantFrequencyReport, String> {
+    if embeddings.is_empty() {
+        return Err("no embeddings provided".to_string());
+    }
+
+    let vocab_size = embeddings.len();
+    if vocab_size < config.modulus {
+        return Err(format!(
+            "embedding count {} less than modulus {}",
+            vocab_size, config.modulus
+        ));
+    }
+
+    // Analyze each embedding dimension and collect dominant frequencies
+    let mut frequency_histogram: HashMap<usize, usize> = HashMap::new();
+    let embedding_dim = embeddings[0].len();
+
+    // For each embedding dimension, compute FFT across all tokens and find dominant frequency
+    for dim in 0..embedding_dim {
+        let mut signal = Vec::with_capacity(vocab_size);
+        for embedding in embeddings.iter().take(vocab_size) {
+            if dim >= embedding.len() {
+                return Err(format!(
+                    "embedding dimension mismatch at dim {}",
+                    dim
+                ));
+            }
+            signal.push(embedding[dim]);
+        }
+
+        // Compute FFT and find dominant frequency
+        let magnitudes = compute_fft(&signal);
+        let dominant_freq = find_dominant_frequency(&magnitudes);
+        *frequency_histogram.entry(dominant_freq).or_insert(0) += 1;
+    }
+
+    // Check 1: Modulus frequency should appear significantly
+    let modulus_count = frequency_histogram.get(&config.modulus).copied().unwrap_or(0);
+    let modulus_frequency_fraction = modulus_count as f64 / embedding_dim as f64;
+
+    if modulus_frequency_fraction < config.min_modulus_frequency_fraction {
+        return Err(format!(
+            "modulus frequency {} appears in only {:.3} of dimensions (threshold {:.3})",
+            config.modulus, modulus_frequency_fraction, config.min_modulus_frequency_fraction
+        ));
+    }
+
+    // Check 2: Spectrum should NOT resemble white noise (low entropy)
+    // High entropy = uniform distribution (white noise), low entropy = structured peaks
+    let total_dims = embedding_dim as f64;
+    let mut entropy = 0.0;
+    for &count in frequency_histogram.values() {
+        if count > 0 {
+            let p = count as f64 / total_dims;
+            entropy -= p * p.log2();
+        }
+    }
+    // Normalize entropy by max possible (log2 of unique frequency count)
+    let max_entropy = (frequency_histogram.len() as f64).log2();
+    let normalized_entropy = if max_entropy > 0.0 {
+        entropy / max_entropy
+    } else {
+        0.0
+    };
+
+    if normalized_entropy > config.max_spectrum_entropy {
+        return Err(format!(
+            "spectrum entropy {:.3} too high (white noise threshold {:.3})",
+            normalized_entropy, config.max_spectrum_entropy
+        ));
+    }
+
+    // Check 3: Peak frequencies should be significantly stronger than median
+    let mut counts: Vec<usize> = frequency_histogram.values().copied().collect();
+    counts.sort_unstable();
+    let median_count = if counts.is_empty() {
+        0
+    } else {
+        counts[counts.len() / 2]
+    };
+    let peak_count = counts.last().copied().unwrap_or(0);
+    let peak_to_median_ratio = if median_count > 0 {
+        peak_count as f64 / median_count as f64
+    } else {
+        f64::INFINITY
+    };
+
+    if peak_to_median_ratio < config.min_peak_to_median_ratio {
+        return Err(format!(
+            "peak to median ratio {:.3} below threshold {:.3}",
+            peak_to_median_ratio, config.min_peak_to_median_ratio
+        ));
+    }
+
+    // Collect top frequencies for the report
+    let mut freq_counts: Vec<(usize, usize)> = frequency_histogram.into_iter().collect();
+    freq_counts.sort_by(|a, b| b.1.cmp(&a.1));
+    let top_frequencies: Vec<(usize, usize)> = freq_counts.into_iter().take(5).collect();
+
+    Ok(FFTDominantFrequencyReport {
+        modulus_frequency_fraction,
+        spectrum_entropy: normalized_entropy,
+        peak_to_median_ratio,
+        top_frequencies,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct FFTDominantFrequencyConfig {
+    pub modulus: usize,
+    pub min_modulus_frequency_fraction: f64,
+    pub max_spectrum_entropy: f64,
+    pub min_peak_to_median_ratio: f64,
+}
+
+impl FFTDominantFrequencyConfig {
+    pub fn default_for_modulus(modulus: usize) -> Self {
+        Self {
+            modulus,
+            min_modulus_frequency_fraction: 0.15,
+            max_spectrum_entropy: 0.85,
+            min_peak_to_median_ratio: 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FFTDominantFrequencyReport {
+    pub modulus_frequency_fraction: f64,
+    pub spectrum_entropy: f64,
+    pub peak_to_median_ratio: f64,
+    pub top_frequencies: Vec<(usize, usize)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EmbeddingClockConfig {
     pub max_radius_std_fraction: f64,
@@ -858,5 +1006,154 @@ mod tests {
         let err = verify_embedding_clock_geometry(&embeddings, modulus, &config)
             .expect_err("expected ordering verification to fail");
         assert!(err.contains("mean angular error"));
+    }
+
+    #[test]
+    fn fft_dominant_frequency_passes_on_modulus_structure() {
+        // Create embeddings with strong modulus-113 frequency component
+        // Mix in some other frequencies to get a realistic peak-to-median ratio
+        let modulus = 113;
+        let vocab_size = 114; // 0-112 + equals token
+        let embedding_dim = 128;
+        let tau = std::f64::consts::PI * 2.0;
+
+        let mut embeddings = Vec::with_capacity(vocab_size);
+        for token in 0..vocab_size {
+            let mut embedding = Vec::with_capacity(embedding_dim);
+            for dim in 0..embedding_dim {
+                // 60% of dimensions have modulus frequency, 40% have other frequencies
+                let freq = if dim % 5 < 3 {
+                    modulus
+                } else {
+                    // Use various other frequencies for the remaining dims
+                    20 + (dim % 20)
+                };
+                let angle = tau * freq as f64 * token as f64 / vocab_size as f64
+                    + dim as f64 * 0.1;
+                embedding.push(angle.sin());
+            }
+            embeddings.push(embedding);
+        }
+
+        let config = FFTDominantFrequencyConfig::default_for_modulus(modulus);
+        let report = verify_fft_dominant_frequencies_from_embeddings(&embeddings, &config)
+            .expect("expected modulus structure to pass");
+
+        assert!(report.modulus_frequency_fraction >= config.min_modulus_frequency_fraction);
+        assert!(report.spectrum_entropy <= config.max_spectrum_entropy);
+        assert!(report.peak_to_median_ratio >= config.min_peak_to_median_ratio);
+        assert!(report.top_frequencies.iter().any(|(freq, _)| *freq == modulus));
+    }
+
+    #[test]
+    fn fft_dominant_frequency_fails_on_white_noise() {
+        // Create random embeddings (white noise spectrum)
+        let modulus = 113;
+        let vocab_size = 114;
+        let embedding_dim = 128;
+
+        let mut embeddings = Vec::with_capacity(vocab_size);
+        for token in 0..vocab_size {
+            let mut embedding = Vec::with_capacity(embedding_dim);
+            for dim in 0..embedding_dim {
+                // Pseudo-random values
+                let value = ((token * 17 + dim * 31) % 100) as f64 / 50.0 - 1.0;
+                embedding.push(value);
+            }
+            embeddings.push(embedding);
+        }
+
+        let config = FFTDominantFrequencyConfig::default_for_modulus(modulus);
+        let err = verify_fft_dominant_frequencies_from_embeddings(&embeddings, &config)
+            .expect_err("expected white noise to fail");
+
+        // Should fail on either modulus frequency fraction or spectrum entropy
+        assert!(
+            err.contains("modulus frequency") || err.contains("spectrum entropy")
+                || err.contains("peak to median")
+        );
+    }
+
+    #[test]
+    fn fft_dominant_frequency_fails_on_wrong_frequency() {
+        // Create embeddings with dominant frequency at 57 (not 113)
+        let modulus = 113;
+        let vocab_size = 114;
+        let embedding_dim = 128;
+        let tau = std::f64::consts::PI * 2.0;
+        let wrong_frequency = 57;
+
+        let mut embeddings = Vec::with_capacity(vocab_size);
+        for token in 0..vocab_size {
+            let mut embedding = Vec::with_capacity(embedding_dim);
+            for dim in 0..embedding_dim {
+                // Each dimension has a sine wave with wrong frequency
+                let angle = tau * wrong_frequency as f64 * token as f64 / vocab_size as f64
+                    + dim as f64 * 0.1;
+                embedding.push(angle.sin());
+            }
+            embeddings.push(embedding);
+        }
+
+        let config = FFTDominantFrequencyConfig::default_for_modulus(modulus);
+        let err = verify_fft_dominant_frequencies_from_embeddings(&embeddings, &config)
+            .expect_err("expected wrong frequency to fail");
+
+        assert!(err.contains("modulus frequency"));
+    }
+
+    #[test]
+    fn fft_dominant_frequency_fails_on_flat_embeddings() {
+        // Create constant embeddings (DC component only, no structure)
+        let modulus = 113;
+        let vocab_size = 114;
+        let embedding_dim = 128;
+
+        let embeddings = vec![vec![1.5; embedding_dim]; vocab_size];
+
+        let config = FFTDominantFrequencyConfig::default_for_modulus(modulus);
+        let err = verify_fft_dominant_frequencies_from_embeddings(&embeddings, &config)
+            .expect_err("expected flat embeddings to fail");
+
+        assert!(err.contains("modulus frequency") || err.contains("peak to median"));
+    }
+
+    #[test]
+    fn fft_dominant_frequency_fails_on_weak_peaks() {
+        // Create embeddings with many frequencies at similar magnitudes (no clear peaks)
+        let modulus = 113;
+        let vocab_size = 114;
+        let embedding_dim = 128;
+        let tau = std::f64::consts::PI * 2.0;
+
+        let mut embeddings = Vec::with_capacity(vocab_size);
+        for token in 0..vocab_size {
+            let mut embedding = Vec::with_capacity(embedding_dim);
+            for dim in 0..embedding_dim {
+                // Mix many frequencies with similar amplitudes
+                let mut value = 0.0;
+                for freq in 1..10 {
+                    let angle =
+                        tau * freq as f64 * token as f64 / vocab_size as f64 + dim as f64 * 0.01;
+                    value += angle.sin() / 10.0;
+                }
+                embedding.push(value);
+            }
+            embeddings.push(embedding);
+        }
+
+        let config = FFTDominantFrequencyConfig {
+            modulus,
+            min_modulus_frequency_fraction: 0.15,
+            max_spectrum_entropy: 0.85,
+            min_peak_to_median_ratio: 2.0,
+        };
+        let err = verify_fft_dominant_frequencies_from_embeddings(&embeddings, &config)
+            .expect_err("expected weak peaks to fail");
+
+        assert!(
+            err.contains("modulus frequency") || err.contains("spectrum entropy")
+                || err.contains("peak to median")
+        );
     }
 }
