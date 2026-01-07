@@ -7,6 +7,7 @@ use burn::{
     },
     tensor::{backend::Backend, Int, Tensor},
 };
+use burn::tensor::module::embedding;
 
 use crate::data::ModularAdditionDataset;
 
@@ -112,6 +113,10 @@ impl<B: Backend> Transformer<B> {
         embedding.squeeze::<2>() // Remove seq dimension -> [1, embedding_dim]
     }
 
+    pub fn token_embedding_weights(&self) -> Tensor<B, 2> {
+        self.token_embedding.weight.val()
+    }
+
     /// Forward pass
     /// Input: [batch_size, seq_length] of token indices
     /// Output: [batch_size, vocab_size] logits for next token prediction
@@ -141,6 +146,43 @@ impl<B: Backend> Transformer<B> {
 
         // Take the last position (after '=') for prediction
         let last_hidden = hidden.slice([0..batch_size, (seq_length - 1)..seq_length])
+            .squeeze();
+
+        // Project to vocabulary
+        self.lm_head.forward(last_hidden)
+    }
+
+    pub fn forward_with_token_weights(
+        &self,
+        x: Tensor<B, 2, Int>,
+        token_weights: Tensor<B, 2>,
+    ) -> Tensor<B, 2> {
+        let [batch_size, seq_length] = x.dims();
+        let device = x.device();
+
+        // Token embeddings: [batch_size, seq_length, d_model]
+        let tok_emb = embedding(token_weights, x);
+
+        // Position embeddings: [batch_size, seq_length, d_model]
+        let positions = Tensor::arange(0..seq_length as i64, &device)
+            .reshape([1, seq_length])
+            .repeat(&[batch_size, 1]);
+        let pos_emb = self.position_embedding.forward(positions);
+
+        // Add token and position embeddings
+        let mut hidden = tok_emb + pos_emb;
+
+        // Apply transformer layers
+        for layer in &self.layers {
+            hidden = layer.forward(hidden);
+        }
+
+        // Final layer norm
+        hidden = self.ln_f.forward(hidden);
+
+        // Take the last position (after '=') for prediction
+        let last_hidden = hidden
+            .slice([0..batch_size, (seq_length - 1)..seq_length])
             .squeeze();
 
         // Project to vocabulary

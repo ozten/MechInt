@@ -1,7 +1,11 @@
-use burn::tensor::backend::Backend;
+use burn::{
+    data::dataset::Dataset,
+    nn::loss::CrossEntropyLossConfig,
+    tensor::{backend::Backend, Int, Tensor, TensorData},
+};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{data::ModularAdditionDataset, model::Transformer};
 
@@ -109,6 +113,140 @@ fn compute_fft(data: &[f64]) -> Vec<f64> {
 
     // Compute magnitudes
     buffer.iter().map(|c| c.norm()).collect()
+}
+
+fn inverse_fft(data: &mut [Complex<f64>]) {
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_inverse(data.len());
+    fft.process(data);
+}
+
+fn top_k_frequency_indices(magnitudes: &[f64], k: usize) -> Vec<usize> {
+    let mut indexed: Vec<(usize, f64)> = magnitudes.iter().copied().enumerate().collect();
+    indexed.sort_by(|(idx_a, mag_a), (idx_b, mag_b)| {
+        mag_b
+            .partial_cmp(mag_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| idx_a.cmp(idx_b))
+    });
+
+    let keep = k.min(indexed.len());
+    indexed.iter().take(keep).map(|(idx, _)| *idx).collect()
+}
+
+fn restrict_signal_to_top_k_frequencies(signal: &[f64], top_k: usize) -> Vec<f64> {
+    if signal.is_empty() {
+        return Vec::new();
+    }
+
+    if top_k == 0 {
+        return vec![0.0; signal.len()];
+    }
+
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(signal.len());
+
+    let mut buffer: Vec<Complex<f64>> = signal
+        .iter()
+        .map(|&x| Complex::new(x, 0.0))
+        .collect();
+    fft.process(&mut buffer);
+
+    let magnitudes: Vec<f64> = buffer.iter().map(|c| c.norm()).collect();
+    let keep = top_k_frequency_indices(&magnitudes, top_k);
+    let keep_set: HashSet<usize> = keep.into_iter().collect();
+
+    for (idx, value) in buffer.iter_mut().enumerate() {
+        if !keep_set.contains(&idx) {
+            *value = Complex::new(0.0, 0.0);
+        }
+    }
+
+    inverse_fft(&mut buffer);
+
+    let scale = 1.0 / signal.len() as f64;
+    buffer.iter().map(|c| c.re * scale).collect()
+}
+
+fn restricted_token_embedding_weights<B: Backend>(
+    model: &Transformer<B>,
+    top_k: usize,
+) -> Vec<f32> {
+    let weight = model.token_embedding_weights();
+    let [vocab_size, d_model] = weight.dims();
+    let weight_data: Vec<f32> = weight.into_data().to_vec().unwrap();
+    let mut restricted = vec![0.0f32; weight_data.len()];
+
+    for dim in 0..d_model {
+        let mut column = Vec::with_capacity(vocab_size);
+        for token in 0..vocab_size {
+            column.push(weight_data[token * d_model + dim] as f64);
+        }
+        let filtered = restrict_signal_to_top_k_frequencies(&column, top_k);
+        for token in 0..vocab_size {
+            restricted[token * d_model + dim] = filtered[token] as f32;
+        }
+    }
+
+    restricted
+}
+
+pub fn compute_restricted_loss<B: Backend>(
+    model: &Transformer<B>,
+    dataset: &ModularAdditionDataset,
+    device: &B::Device,
+    top_k: usize,
+    batch_size: usize,
+) -> Result<f64, String> {
+    if batch_size == 0 {
+        return Err("batch_size must be greater than 0".to_string());
+    }
+
+    let restricted_weights = restricted_token_embedding_weights(model, top_k);
+    let [vocab_size, d_model] = model.token_embedding_weights().dims();
+    let token_weights = Tensor::<B, 2>::from_data(
+        TensorData::new(restricted_weights, [vocab_size, d_model]),
+        device,
+    );
+
+    let loss_fn = CrossEntropyLossConfig::new().init(device);
+    let mut total_loss = 0.0f64;
+    let mut total_batches = 0usize;
+
+    for batch_start in (0..dataset.len()).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(dataset.len());
+        let batch_len = batch_end - batch_start;
+        if batch_len == 0 {
+            break;
+        }
+
+        let mut inputs_vec = Vec::with_capacity(batch_len * 3);
+        let mut targets_vec = Vec::with_capacity(batch_len);
+
+        for idx in batch_start..batch_end {
+            let (input, target) = dataset.get(idx).ok_or_else(|| {
+                format!("missing dataset sample at index {}", idx)
+            })?;
+            inputs_vec.extend(input.iter().map(|value| *value as i32));
+            targets_vec.push(target as i32);
+        }
+
+        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_vec.as_slice(), device)
+            .reshape([batch_len, 3]);
+        let targets = Tensor::<B, 1, Int>::from_ints(targets_vec.as_slice(), device);
+
+        let logits = model.forward_with_token_weights(inputs, token_weights.clone());
+        let loss = loss_fn.forward(logits, targets);
+        let loss_value: f64 = loss.into_data().to_vec().unwrap().get(0).copied().unwrap_or(0.0);
+        total_loss += loss_value;
+        total_batches += 1;
+    }
+
+    if total_batches == 0 {
+        return Err("no batches computed for restricted loss".to_string());
+    }
+
+    Ok(total_loss / total_batches as f64)
 }
 
 /// Find the index of the dominant frequency (excluding DC component at index 0)
@@ -242,5 +380,26 @@ impl AccuracyHistory {
         std::fs::write(filename, json)?;
         println!("💾 Accuracy history saved to: {}", filename);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_k_frequency_indices_stable_with_ties() {
+        let magnitudes = vec![0.1, 1.0, 1.0, 0.5];
+        let first = top_k_frequency_indices(&magnitudes, 2);
+        let second = top_k_frequency_indices(&magnitudes, 2);
+        assert_eq!(first, vec![1, 2]);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn restrict_signal_zeroes_when_top_k_zero() {
+        let signal = vec![1.0, -1.0, 0.5, -0.5];
+        let filtered = restrict_signal_to_top_k_frequencies(&signal, 0);
+        assert_eq!(filtered, vec![0.0, 0.0, 0.0, 0.0]);
     }
 }

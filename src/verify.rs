@@ -44,6 +44,20 @@ pub struct GrokkingPhaseReport {
     pub loss_drop_ratio: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RestrictedLossVerificationConfig {
+    pub plateau_min_step: usize,
+    pub drop_window: usize,
+    pub drop_fraction: f64,
+    pub min_step_lead: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestrictedLossReport {
+    pub restricted_drop_step: usize,
+    pub full_drop_step: usize,
+}
+
 pub fn verify_grokking_phase_transition(
     loss_history: &LossHistory,
     accuracy_history: &AccuracyHistory,
@@ -145,6 +159,74 @@ fn verify_loss_drop(
     }
 
     Ok(after_avg / before_avg)
+}
+
+pub fn verify_restricted_loss_early_drop(
+    full_losses: &[(usize, f64)],
+    restricted_losses: &[(usize, f64)],
+    config: &RestrictedLossVerificationConfig,
+) -> Result<RestrictedLossReport, String> {
+    let restricted_baseline =
+        baseline_loss(restricted_losses, config.plateau_min_step, config.drop_window)?;
+    let full_baseline = baseline_loss(full_losses, config.plateau_min_step, config.drop_window)?;
+
+    let restricted_drop_step = find_drop_step(
+        restricted_losses,
+        config.plateau_min_step,
+        restricted_baseline,
+        config.drop_fraction,
+    )?;
+    let full_drop_step = find_drop_step(
+        full_losses,
+        config.plateau_min_step,
+        full_baseline,
+        config.drop_fraction,
+    )?;
+
+    if restricted_drop_step + config.min_step_lead > full_drop_step {
+        return Err(format!(
+            "restricted loss drops at step {}, expected at least {} steps before full loss (step {})",
+            restricted_drop_step, config.min_step_lead, full_drop_step
+        ));
+    }
+
+    Ok(RestrictedLossReport {
+        restricted_drop_step,
+        full_drop_step,
+    })
+}
+
+fn baseline_loss(
+    losses: &[(usize, f64)],
+    plateau_min_step: usize,
+    drop_window: usize,
+) -> Result<f64, String> {
+    let before: Vec<f64> = losses
+        .iter()
+        .filter(|(step, _)| *step <= plateau_min_step)
+        .map(|(_, loss)| *loss)
+        .collect();
+
+    if before.len() < drop_window || drop_window == 0 {
+        return Err("insufficient loss samples for baseline".to_string());
+    }
+
+    let window = &before[before.len() - drop_window..];
+    Ok(window.iter().sum::<f64>() / drop_window as f64)
+}
+
+fn find_drop_step(
+    losses: &[(usize, f64)],
+    plateau_min_step: usize,
+    baseline: f64,
+    drop_fraction: f64,
+) -> Result<usize, String> {
+    losses
+        .iter()
+        .filter(|(step, _)| *step >= plateau_min_step)
+        .find(|(_, loss)| *loss <= baseline * (1.0 - drop_fraction))
+        .map(|(step, _)| *step)
+        .ok_or_else(|| "loss never drops below threshold".to_string())
 }
 
 /// Verify that the model actually learned modular addition
@@ -323,5 +405,51 @@ mod tests {
         let err = verify_grokking_phase_transition(&loss_history, &accuracy_history, &config)
             .expect_err("expected grokking verification to fail");
         assert!(err.contains("validation accuracy never reaches target"));
+    }
+
+    #[test]
+    fn restricted_loss_detection_passes_with_early_drop() {
+        let full_loss = vec![
+            (0, 2.0),
+            (500, 2.0),
+            (1500, 2.0),
+            (2500, 2.0),
+            (3500, 0.3),
+        ];
+        let restricted_loss = vec![
+            (0, 2.0),
+            (500, 2.0),
+            (1500, 0.8),
+            (2500, 0.4),
+            (3500, 0.3),
+        ];
+
+        let config = RestrictedLossVerificationConfig {
+            plateau_min_step: 1000,
+            drop_window: 2,
+            drop_fraction: 0.5,
+            min_step_lead: 500,
+        };
+
+        let report = verify_restricted_loss_early_drop(&full_loss, &restricted_loss, &config)
+            .expect("expected restricted loss verification to pass");
+        assert!(report.restricted_drop_step < report.full_drop_step);
+    }
+
+    #[test]
+    fn restricted_loss_detection_fails_when_full_drops_first() {
+        let full_loss = vec![(0, 2.0), (1000, 1.0), (1500, 0.8)];
+        let restricted_loss = vec![(0, 2.0), (1000, 2.0), (1500, 0.8)];
+
+        let config = RestrictedLossVerificationConfig {
+            plateau_min_step: 500,
+            drop_window: 1,
+            drop_fraction: 0.3,
+            min_step_lead: 200,
+        };
+
+        let err = verify_restricted_loss_early_drop(&full_loss, &restricted_loss, &config)
+            .expect_err("expected restricted loss verification to fail");
+        assert!(err.contains("restricted loss drops"));
     }
 }

@@ -1,0 +1,5 @@
+## [2026-01-07 21:21:38] Completed MechInt-mhp
+- Added restricted-loss FFT filtering helpers and dataset loss evaluation
+- Added restricted-loss verification logic with synthetic tests
+- Added token-weight forward path for filtered embeddings and ignored git scratch dir
+- Suggestions: integrate restricted/excluded loss into training metrics when ready
