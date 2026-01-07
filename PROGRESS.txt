@@ -45,3 +45,11 @@
 - Tests confirm metric correctly detects diagonal periodicity stronger than axis-aligned periodicity
 - Suggestions: apply this verification to post-grokking MLP neuron activations to validate interference hypothesis
 
+## [2026-01-07 23:05:00] Completed MechInt-4qy
+- Added snake curve shape verification to validate grokking phenomenon on log-scale plots
+- Implemented verify_snake_curve_shape() with checks for early train convergence, val plateau, delayed val jump
+- Added 5 comprehensive test cases covering valid grokking curves and common failure modes
+- Verified log-scale plotting functions (plot_loss_history_dual_logscale, plot_accuracy_history_logscale, plot_grokking_combined_logscale) use .log_scale() API correctly
+- All 44 library tests pass including new snake curve verification tests
+- Suggestions: apply snake curve verification to actual training runs to confirm characteristic grokking shape
+
