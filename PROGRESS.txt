@@ -29,3 +29,8 @@
 - Added grokking-spec validation for training hyperparameters and wired it into startup
 - Expanded training config tests to flag deviations from required optimizer and schedule values
 - Suggestions: extend validation to any CLI/config overrides if added later
+
+## [2026-01-07 22:25:27] Completed MechInt-6z5
+- Added accuracy jump validation around the grokking transition using validation accuracy windows
+- Updated grokking verification config with an accuracy window and expanded unit tests
+- Suggestions: tune accuracy window/tolerance if real runs show gradual pre-transition creep
