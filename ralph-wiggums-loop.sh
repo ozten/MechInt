@@ -23,7 +23,9 @@ while [ $iteration -lt $MAX_ITERATIONS ]; do
     echo "Open tasks: $OPEN_TASKS"
     
     # Run Claude with the prompt
-    claude -p "$(cat $PROMPT_FILE)" --dangerously-skip-permissions    
+    claude -p "$(cat $PROMPT_FILE)" --dangerously-skip-permissions \
+        --verbose --output-format stream-json \
+        2>&1 | tee ./claude-iteration-$iteration.jsonl
     
     EXIT_CODE=$?
     
