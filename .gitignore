@@ -8,3 +8,9 @@ codex-iter*
 .beads/bd.sock.startlock
 last-iteration-output.txt
 .git-writable/
+
+# Training artifacts and outputs
+artifacts/
+
+# Claude Code session logs
+claude-iteration-*.jsonl
