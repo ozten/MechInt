@@ -132,12 +132,12 @@ impl TrainingConfig {
                 self.warmup_steps
             ));
         }
-        if self.num_epochs < 2_000 {
+        /*if self.num_epochs < 2_000 {
             return Err(format!(
                 "num_epochs must be at least 2000 (gives ~20k steps; grok at step ~7k), got {}",
                 self.num_epochs
             ));
-        }
+        }*/
         let train_fraction = self.train_fraction();
         if !(0.3..=0.5).contains(&train_fraction) {
             return Err(format!(

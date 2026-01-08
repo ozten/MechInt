@@ -2,6 +2,7 @@ use image::{ImageBuffer, Rgb, RgbImage};
 use imageproc::drawing::{draw_filled_circle_mut, draw_line_segment_mut};
 use plotters::prelude::*;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::data::ModularAdditionDataset;
 
@@ -738,11 +739,14 @@ pub fn plot_embedding_grid_3x3(
     // Split into 3×3 grid
     let cell_areas = root.split_evenly((3, 3));
 
+    let render_start = Instant::now();
     println!("   Rendering 3×3 grid ({} cells)...", 9);
+    let mut cell_index = 0;
     for row in 0..3 {
         for col in 0..3 {
             let idx = row * 3 + col;
-            print!(".");
+            cell_index += 1;
+            print!("\r   Rendering 3×3 grid... {}/{}", cell_index, 9);
             use std::io::Write;
             std::io::stdout().flush().unwrap();
             let area = &cell_areas[idx];
@@ -835,8 +839,10 @@ pub fn plot_embedding_grid_3x3(
         }
     }
 
-    println!(); // newline after progress dots
+    println!(); // newline after progress update
     root.present()?;
+    let render_elapsed = render_start.elapsed();
+    println!("   ✅ Embedding grid rendered in {:.2?}", render_elapsed);
     println!("   📊 Embedding grid plot saved to: {}", output_path);
     println!("      Title: {}", title);
     Ok(())

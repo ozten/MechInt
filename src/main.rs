@@ -24,11 +24,33 @@ use data::{build_dataloaders, ModularAdditionDataset};
 use model::{Transformer, TransformerConfig};
 use training_config::TrainingConfig;
 use std::{fs, path::Path};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 type WgpuBackend = Wgpu;
 type MyAutodiffBackend = Autodiff<WgpuBackend>;
 
+static CTRL_C_SEEN: OnceLock<AtomicBool> = OnceLock::new();
+
+fn install_ctrlc_handler() {
+    let _ = CTRL_C_SEEN.set(AtomicBool::new(false));
+    ctrlc::set_handler(|| {
+        let seen = CTRL_C_SEEN
+            .get()
+            .map(|flag| flag.swap(true, Ordering::SeqCst))
+            .unwrap_or(false);
+        if !seen {
+            eprintln!("\n⚠️  Interrupt received, exiting...");
+        }
+        std::process::exit(130);
+    })
+    .expect("failed to install Ctrl-C handler");
+}
+
 fn main() {
+    install_ctrlc_handler();
+
     // Parse command-line arguments
     let args: Vec<String> = std::env::args().collect();
     let video_mode = args.contains(&"--video".to_string());
@@ -1113,6 +1135,9 @@ fn generate_checkpoint_embeddings_visualization(
     checkpoints.push((num_epochs, "final"));
 
     for (epoch, label) in checkpoints {
+        let checkpoint_start = Instant::now();
+        println!("   ▶️  Embedding viz for {} (epoch {})", label, epoch);
+
         // Try labeled checkpoint first (for initial/grokking/final)
         let labeled_path = Path::new(artifact_dir)
             .join("checkpoint_labeled")
@@ -1137,16 +1162,30 @@ fn generate_checkpoint_embeddings_visualization(
             device,
         ) {
             Ok(model) => {
+                let load_elapsed = checkpoint_start.elapsed();
+                println!("      ✅ Loaded checkpoint in {:.2?}", load_elapsed);
+
                 // Extract embeddings
+                let embed_start = Instant::now();
                 let embeddings = analysis::extract_all_embeddings(&model);
+                let embed_elapsed = embed_start.elapsed();
 
                 if embeddings.is_empty() || embeddings[0].is_empty() {
                     println!("   ⚠️  Skipping {}: no embeddings found", label);
                     continue;
                 }
 
+                println!(
+                    "      ✅ Extracted embeddings in {:.2?} ({} × {})",
+                    embed_elapsed,
+                    embeddings.len(),
+                    embeddings[0].len()
+                );
+
                 // Select 3 interesting dimensions (high variance)
+                let dims_start = Instant::now();
                 let interesting_dims = plotting::select_interesting_dimensions(&embeddings, 3);
+                let dims_elapsed = dims_start.elapsed();
 
                 if interesting_dims.len() < 3 {
                     println!("   ⚠️  Skipping {}: insufficient dimensions", label);
@@ -1163,9 +1202,17 @@ fn generate_checkpoint_embeddings_visualization(
                 let output_path = format!("{}/embeddings_3x3_{}.png", viz_dir, label);
                 let title = format!("Embedding Grid - {} (epoch {})", label, epoch);
 
+                println!("      ✅ Selected dims in {:.2?}: {:?}", dims_elapsed, dims);
+
+                let plot_start = Instant::now();
                 match plotting::plot_embedding_grid_3x3(&embeddings, &dims, &output_path, &title) {
                     Ok(_) => {
-                        println!("   ✅ Generated embedding grid for {}", label);
+                        let plot_elapsed = plot_start.elapsed();
+                        let total_elapsed = checkpoint_start.elapsed();
+                        println!(
+                            "   ✅ Generated embedding grid for {} in {:.2?} (total {:.2?})",
+                            label, plot_elapsed, total_elapsed
+                        );
                     }
                     Err(e) => {
                         eprintln!("   ⚠️  Could not generate embedding grid for {}: {}", label, e);
