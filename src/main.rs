@@ -172,11 +172,10 @@ fn generate_single_video_frame<B: AutodiffBackend>(
         interesting_dims[6],
     ];
 
-    // Generate 7x7 embedding grid with zero-padded frame number
+    // Generate 7x7 embedding grid with zero-padded epoch number
     let output_path = format!(
-        "{}/frame_{:05}_epoch_{:05}.png",
+        "{}/epoch_{:05}.png",
         video_dir.display(),
-        epoch,
         epoch
     );
 
