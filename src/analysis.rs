@@ -90,7 +90,7 @@ fn get_token_embedding<B: Backend>(model: &Transformer<B>, token_id: usize) -> V
     // Get the token embedding directly from the model
     let embedding_tensor = model.get_token_embedding(token_id);
 
-    // Convert to vector - shape is [1, 1, embedding_dim], we want [embedding_dim]
+    // Convert to vector - shape is [embedding_dim]
     let embedding_data: Vec<f32> = embedding_tensor.into_data().to_vec().unwrap();
 
     // Convert to f64

@@ -98,14 +98,14 @@ impl TransformerConfig {
 
 impl<B: Backend> Transformer<B> {
     /// Get the token embedding for a single token (for analysis)
-    /// Returns shape [1, embedding_dim]
-    pub fn get_token_embedding(&self, token_id: usize) -> Tensor<B, 2> {
+    /// Returns shape [embedding_dim]
+    pub fn get_token_embedding(&self, token_id: usize) -> Tensor<B, 1> {
         let device = self.token_embedding.devices()[0].clone();
         let token_vec = vec![token_id as i32];
         let input = Tensor::<B, 1, Int>::from_ints(token_vec.as_slice(), &device)
             .reshape([1, 1]);
         let embedding = self.token_embedding.forward(input); // [1, 1, embedding_dim]
-        embedding.squeeze::<2>() // Remove seq dimension -> [1, embedding_dim]
+        embedding.squeeze() // Remove all size-1 dimensions -> [embedding_dim]
     }
 
     pub fn token_embedding_weights(&self) -> Tensor<B, 2> {
