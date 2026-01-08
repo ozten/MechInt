@@ -43,6 +43,41 @@ impl Default for TrainingConfig {
 }
 
 impl TrainingConfig {
+    /// Create a TrainingConfig from environment variables for parameter sweeps.
+    /// Supported env vars:
+    /// - GROK_WEIGHT_DECAY: f32 (default: 1.0)
+    /// - GROK_SEED: u64 (default: 42)
+    /// - GROK_NUM_EPOCHS: usize (default: 3000)
+    /// - GROK_SKIP_VALIDATION: bool (default: false, set to "1" to skip validation)
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(wd_str) = std::env::var("GROK_WEIGHT_DECAY") {
+            if let Ok(wd) = wd_str.parse::<f32>() {
+                config.optimizer = OptimizerSpec::AdamW {
+                    beta_1: 0.9,
+                    beta_2: 0.98,
+                    epsilon: 1e-8,
+                    weight_decay: wd,
+                };
+            }
+        }
+
+        if let Ok(seed_str) = std::env::var("GROK_SEED") {
+            if let Ok(seed) = seed_str.parse::<u64>() {
+                config.seed = seed;
+            }
+        }
+
+        if let Ok(epochs_str) = std::env::var("GROK_NUM_EPOCHS") {
+            if let Ok(epochs) = epochs_str.parse::<usize>() {
+                config.num_epochs = epochs;
+            }
+        }
+
+        config
+    }
+
     pub fn steps_per_epoch(&self, dataset_len: usize) -> usize {
         (dataset_len + self.batch_size - 1) / self.batch_size
     }
@@ -71,6 +106,11 @@ impl TrainingConfig {
     }
 
     pub fn validate_grokking_spec(&self) -> Result<(), String> {
+        // Allow skipping validation for parameter sweeps
+        if std::env::var("GROK_SKIP_VALIDATION").unwrap_or_default() == "1" {
+            return Ok(());
+        }
+
         if self.batch_size != 512 {
             return Err(format!(
                 "batch_size must be 512, got {}",

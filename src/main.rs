@@ -29,21 +29,27 @@ type WgpuBackend = Wgpu;
 type MyAutodiffBackend = Autodiff<WgpuBackend>;
 
 fn main() {
-    let training_config = TrainingConfig::default();
+    // Load config from environment variables (for parameter sweeps) or use defaults
+    let training_config = TrainingConfig::from_env();
     training_config
         .validate_grokking_spec()
         .expect("Training config must match grokking spec");
 
+    let weight_decay = match training_config.optimizer {
+        training_config::OptimizerSpec::AdamW { weight_decay, .. } => weight_decay,
+    };
+
     println!("🚀 Grokking experiment starting...");
     println!("Configuration:");
     println!("  - Model: 1-layer transformer (4 heads, dim=128, MLP=512)");
-    println!("  - Optimizer: AdamW (β1=0.9, β2=0.98, weight decay=1.0)");
+    println!("  - Optimizer: AdamW (β1=0.9, β2=0.98, weight decay={})", weight_decay);
     println!(
         "  - Learning rate: {} with {}-step linear warmup",
         training_config.base_learning_rate, training_config.warmup_steps
     );
     println!("  - Batch size: {}", training_config.batch_size);
     println!("  - Training epochs: {}", training_config.num_epochs);
+    println!("  - Seed: {}", training_config.seed);
     println!(
         "  - Target: Modular addition (a + b) mod {}",
         ModularAdditionDataset::modulus()
@@ -72,7 +78,7 @@ fn main() {
     // Setup optimizer to match paper (AdamW with high weight decay, β2=0.98)
     let optim_config = training_config.optimizer_config();
     let optim = optim_config.init();
-    println!("✅ AdamW optimizer initialized (β1=0.9, β2=0.98, weight decay=1.0)");
+    println!("✅ AdamW optimizer initialized (β1=0.9, β2=0.98, weight decay={})", weight_decay);
     println!();
 
     // Training configuration (matching paper)
