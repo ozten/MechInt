@@ -191,3 +191,21 @@
   * Weight norm decay monitoring and verification
 - Implementation is production-ready; empirical validation requires multi-hour training run
 - Suggestions: Next tasks are MechInt-at3 (3D surface visualization) or run full training experiment for empirical validation
+
+## [2026-01-08 00:38:00] Completed MechInt-at3
+- Implemented 3D activation surface visualization with JSON export and Python Plotly visualization script
+- Added src/export.rs module with ActivationSurface struct for JSON serialization and deserialization
+- Created scripts/visualize_activation_surface.py for interactive 3D surface plots and diagonal FFT analysis
+- Integrated activation surface export into main analysis pipeline (exports 5 neuron surfaces from post-grokking checkpoint)
+- Added comprehensive documentation in scripts/README.md with setup instructions and theoretical background
+- Added scripts/requirements.txt for Python dependencies (numpy, plotly)
+- Python script generates:
+  * Interactive 3D surface plots showing activation values across all (x,y) input pairs
+  * 2D heatmap view for pattern analysis
+  * Diagonal periodicity analysis via FFT to quantify Fourier structure
+  * Summary statistics: diagonal mean/std/range, dominant frequency, periodicity strength
+- Exports activation surfaces at epoch 1500 (post-grokking) to capture mature Fourier algorithm structure
+- All 58 library tests pass (added 2 tests for ActivationSurface save/load functionality)
+- Reveals characteristic "corrugated iron" diagonal wave structure proving Fourier algorithm discovery
+- Usage: cargo run --release (exports JSON), then python scripts/visualize_activation_surface.py artifacts/activation_surface_neuron_0.json
+- Suggestions: Next tasks are MechInt-rj9 (weight decay sweep) or MechInt-7ab (dead code cleanup)
