@@ -3,6 +3,7 @@
 mod analysis;
 mod checkpoint;
 mod data;
+mod export;
 mod model;
 mod plotting;
 mod training;
@@ -869,6 +870,20 @@ fn main() {
     println!();
 
     println!();
+    println!("📊 3D Activation Surface Data Export:");
+    println!();
+
+    // Export activation surfaces for Python visualization
+    export_activation_surfaces(
+        artifact_dir,
+        &device,
+        grokking_epoch,
+        num_epochs,
+    );
+
+    println!();
+
+    println!();
     println!("{}", "=".repeat(80));
     println!("🎉 All analysis complete!");
     println!("{}", "=".repeat(80));
@@ -1133,6 +1148,118 @@ fn generate_checkpoint_embeddings_visualization(
             Err(e) => {
                 eprintln!("   ⚠️  Could not load checkpoint for {}: {}", label, e);
             }
+        }
+    }
+}
+
+/// Export activation surface data for post-grokking checkpoint
+/// This data can be visualized using scripts/visualize_activation_surface.py
+fn export_activation_surfaces(
+    artifact_dir: &str,
+    device: &WgpuDevice,
+    grokking_epoch: Option<usize>,
+    num_epochs: usize,
+) {
+    use crate::export::ActivationSurface;
+
+    println!("   Exporting activation surfaces for 3D visualization...");
+
+    // We'll export surfaces from post-grokking checkpoint (or final if no grokking detected)
+    let checkpoint_label = if grokking_epoch.is_some() {
+        "postgrok_e1500"
+    } else {
+        "final"
+    };
+
+    let checkpoint_epoch = if let Some(_epoch) = grokking_epoch {
+        // Try to use post-grokking checkpoint at epoch 1500
+        if num_epochs >= 1500 {
+            1500
+        } else {
+            num_epochs
+        }
+    } else {
+        num_epochs
+    };
+
+    // Try labeled checkpoint first
+    let labeled_path = Path::new(artifact_dir)
+        .join("checkpoint_labeled")
+        .join(format!("model-{}.mpk", checkpoint_label));
+
+    let checkpoint_path = if labeled_path.exists() {
+        labeled_path
+    } else {
+        // Fall back to epoch-based checkpoint
+        Path::new(artifact_dir)
+            .join("checkpoint")
+            .join(format!("model-{}.mpk", checkpoint_epoch))
+    };
+
+    if !checkpoint_path.exists() {
+        println!("   ⚠️  No post-grokking checkpoint found, skipping activation surface export");
+        return;
+    }
+
+    match checkpoint::load_checkpoint::<MyAutodiffBackend>(
+        checkpoint_path.to_str().unwrap(),
+        device,
+    ) {
+        Ok(model) => {
+            let modulus = ModularAdditionDataset::modulus();
+
+            // Export surfaces for several neurons (indices 0, 10, 20, 30, ..., up to 5 neurons)
+            let d_ff = 512; // From config
+            let neuron_indices: Vec<usize> = (0..5).map(|i| i * (d_ff / 5).min(50)).collect();
+
+            for &neuron_index in &neuron_indices {
+                if neuron_index >= d_ff {
+                    continue;
+                }
+
+                match verify::collect_mlp_activation_surface(&model, device, neuron_index) {
+                    Ok(surface) => {
+                        let surface_data = ActivationSurface::new(neuron_index, modulus, surface);
+
+                        let output_path = format!(
+                            "{}/activation_surface_neuron_{}.json",
+                            artifact_dir, neuron_index
+                        );
+
+                        match surface_data.save_json(&output_path) {
+                            Ok(_) => {
+                                println!(
+                                    "   ✅ Exported activation surface for neuron {} to {}",
+                                    neuron_index, output_path
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "   ⚠️  Failed to save activation surface for neuron {}: {}",
+                                    neuron_index, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "   ⚠️  Failed to collect activation surface for neuron {}: {}",
+                            neuron_index, e
+                        );
+                    }
+                }
+            }
+
+            println!(
+                "   💡 Visualize surfaces with: python scripts/visualize_activation_surface.py {}/activation_surface_neuron_0.json",
+                artifact_dir
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "   ⚠️  Could not load checkpoint for activation surface export: {}",
+                e
+            );
         }
     }
 }
