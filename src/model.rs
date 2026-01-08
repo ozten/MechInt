@@ -472,4 +472,89 @@ mod tests {
         assert_eq!(actual_vec, masked_vec);
         assert_ne!(masked_vec, unmasked_vec);
     }
+
+    // Property-based tests using proptest
+    // These tests verify that the model handles random batch sizes correctly
+    // without panicking, which is critical for catching squeeze/reshape bugs
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_forward_with_random_batch_sizes(batch_size in 1usize..=10) {
+            let device = Default::default();
+            let config = TransformerConfig::default();
+            let model = config.init::<TestBackend>(&device);
+
+            // Create input with random batch size
+            // Each row is [a, b, p] where a, b are in [0, p) and p is the modulus
+            // Build a flat vector then reshape to [batch_size, 3]
+            let mut input_data = vec![];
+            for _ in 0..batch_size {
+                input_data.extend_from_slice(&[0, 1, 113]); // Simple valid inputs
+            }
+            let input = Tensor::<TestBackend, 2, Int>::from_data(
+                TensorData::new(input_data, [batch_size, 3]),
+                &device,
+            );
+
+            // Forward pass should not panic regardless of batch size
+            let logits = model.forward(input);
+
+            // Check output shape: [batch_size, vocab_size]
+            prop_assert_eq!(logits.dims(), [batch_size, ModularAdditionDataset::vocab_size()]);
+        }
+
+        #[test]
+        fn test_forward_with_token_weights_random_batch_sizes(batch_size in 1usize..=10) {
+            let device = Default::default();
+            let config = TransformerConfig::default();
+            let model = config.init::<TestBackend>(&device);
+
+            // Create input with random batch size
+            let mut input_data = vec![];
+            for _ in 0..batch_size {
+                input_data.extend_from_slice(&[5, 10, 113]);
+            }
+            let input = Tensor::<TestBackend, 2, Int>::from_data(
+                TensorData::new(input_data, [batch_size, 3]),
+                &device,
+            );
+
+            // Get token weights
+            let token_weights = model.token_embedding_weights();
+
+            // Forward pass with token weights should not panic
+            let logits = model.forward_with_token_weights(input, token_weights);
+
+            // Check output shape: [batch_size, vocab_size]
+            prop_assert_eq!(logits.dims(), [batch_size, ModularAdditionDataset::vocab_size()]);
+        }
+
+        #[test]
+        fn test_forward_with_mlp_activations_random_batch_sizes(batch_size in 1usize..=10) {
+            let device = Default::default();
+            let config = TransformerConfig::default();
+            let model = config.init::<TestBackend>(&device);
+
+            // Create input with random batch size
+            let mut input_data = vec![];
+            for _ in 0..batch_size {
+                input_data.extend_from_slice(&[2, 3, 113]);
+            }
+            let input = Tensor::<TestBackend, 2, Int>::from_data(
+                TensorData::new(input_data, [batch_size, 3]),
+                &device,
+            );
+
+            // Forward pass should return both logits and MLP activations without panicking
+            let (logits, mlp_acts) = model.forward_with_mlp_activations(input);
+
+            // Check output shapes:
+            // - logits: [batch_size, vocab_size]
+            // - mlp_acts: [batch_size, d_ff]
+            prop_assert_eq!(logits.dims(), [batch_size, ModularAdditionDataset::vocab_size()]);
+            prop_assert_eq!(mlp_acts.dims(), [batch_size, config.d_ff]);
+        }
+    }
 }
