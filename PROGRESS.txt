@@ -159,3 +159,18 @@
 - Comprehensive error handling with graceful fallback when checkpoints unavailable
 - All 59 tests pass, code compiles cleanly
 - Suggestions: next task is likely MechInt-l1a (core verification) or MechInt-t75 (checkpoint management)
+## [2026-01-08 02:00:00] Completed MechInt-t75
+- Implemented labeled checkpoint management at key training phases for comprehensive grokking analysis
+- Added checkpoint saving at epoch 100 (~step 1,000): memorization_e100
+  - Captures end of memorization phase when train accuracy reaches 100%
+- Added checkpoint saving at epoch 500 (~step 5,000): plateau_e500
+  - Captures deep plateau phase when validation accuracy frozen at ~1%
+- Added checkpoint saving at epoch 1500 (~step 15,000): postgrok_e1500
+  - Captures post-grokking solidification phase after generalization occurs
+- Existing grokking checkpoint (auto-detected at ~epoch 700) and final checkpoint preserved
+- All checkpoints saved to artifacts/checkpoint_labeled/ with descriptive labels
+- Conditional logic prevents errors on short training runs (checks num_epochs threshold)
+- Infrastructure uses existing copy_checkpoint_set() to save model, optimizer, and scheduler state
+- Enables post-hoc analysis: restricted/excluded loss, weight norm evolution, embedding geometry, MLP activations
+- All 59 tests pass, code compiles cleanly
+- Suggestions: next tasks are MechInt-l1a (verification documentation) or MechInt-at3 (3D visualization)
