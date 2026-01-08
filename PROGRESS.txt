@@ -111,3 +111,26 @@
 - Added 2 comprehensive unit tests for restricted loss drop verification
 - All 56 library tests pass (added 2 new tests)
 - Suggestions: next tasks are visualization pipeline (MechInt-c0w) and automatic grokking detection (MechInt-391)
+
+## [2026-01-08 01:15:00] Completed MechInt-391
+- Implemented automatic grokking phase transition detection with rolling window analysis
+- Added detect_grokking_transition() function in main.rs with configurable thresholds:
+  - MIN_PLATEAU_STEP=1000: ensures detection only after memorization phase
+  - MIN_ACCURACY_JUMP=20%: requires significant spike (not gradual improvement)
+  - WINDOW_SIZE=500: lookback window for baseline calculation
+  - TARGET_VAL_ACC=90%: target validation accuracy threshold
+- Detection identifies characteristic sudden spike from plateau (~1%) to high accuracy (>90%)
+- Integrated into post-training analysis with detailed logging showing:
+  - Exact epoch and step when grokking occurs
+  - Baseline validation accuracy (plateau level)
+  - Post-grok validation accuracy
+  - Magnitude of accuracy jump
+- Automatic checkpoint saving at detected grokking point
+- Fallback to simple threshold detection if no clear spike found
+- Added 3 comprehensive unit tests (total 59 tests, all passing):
+  - test_detect_grokking_transition_finds_spike: validates detection works
+  - test_detect_grokking_transition_no_spike: prevents false positives on gradual improvement
+  - test_detect_grokking_transition_early_spike_ignored: enforces plateau requirement
+- Added tempfile dev dependency for test isolation
+- Expected to detect grokking around step ~7,000 (epoch ~700) in real training runs
+- Suggestions: next tasks are visualization pipeline (MechInt-c0w) and weight norm tracking (MechInt-fi4)
