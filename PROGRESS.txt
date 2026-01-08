@@ -283,3 +283,20 @@
 - Code compiles successfully with expected "never used" warnings (will be used in MechInt-u89)
 - Suggestions: Next task is MechInt-u89 (call video frame generator when --video flag is set)
 
+## [2026-01-08 02:49:19] Completed MechInt-u89
+- Added generate_video_frames() function to create time-lapse visualization of embedding evolution
+- Implemented strategic frame schedule: dense early (epochs 1-100), sparse later (100+)
+- Function loads checkpoints at various epochs and generates 7x7 embedding grid visualizations
+- Conditional call in main() when --video flag is set
+- Outputs frames to artifacts/video_frames/ directory with sequential naming: frame_{idx:04}_epoch_{epoch:05}.png
+- Includes helpful ffmpeg command for video creation: ffmpeg -framerate 10 -pattern_type glob -i 'artifacts/video_frames/frame_*.png' -c:v libx264 -pix_fmt yuv420p grokking_evolution.mp4
+- Removed #[allow(unused_variables)] annotation from video_mode (now used)
+- All 58 library tests pass, release binary compiles successfully
+- Frame schedule captures key phases:
+  * Early phase (1, 10, 25, 50, 75, 100): rapid memorization
+  * Memorization (150-500 by 50): train accuracy reaches 100%
+  * Plateau/grokking (550-1000 by 50): validation accuracy spike
+  * Post-grokking (1100+ by 100): stabilization
+- Automatically uses labeled checkpoints (initial, memorization_e100, plateau_e500, grokking, postgrok_e1500, final)
+- Suggestions: Next task is MechInt-7it (verify Fourier structure in embeddings and MLP neurons)
+
