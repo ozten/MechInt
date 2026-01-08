@@ -15,12 +15,10 @@ use burn::{
     data::dataset::Dataset,
     optim::lr_scheduler::linear::LinearLrSchedulerConfig,
     record::CompactRecorder,
-    train::{
-        metric::{AccuracyMetric, LossMetric, NumericEntry},
-        Learner, LearningParadigm, SupervisedTraining, TrainingStrategy,
-    },
+    tensor::backend::AutodiffBackend,
+    train::metric::NumericEntry,
 };
-use data::{build_dataloaders, ModularAdditionDataset};
+use data::{build_dataloaders, ModularAdditionBatch, ModularAdditionDataset};
 use model::{Transformer, TransformerConfig};
 use training_config::TrainingConfig;
 use std::{fs, path::Path};
@@ -46,6 +44,149 @@ fn install_ctrlc_handler() {
         std::process::exit(130);
     })
     .expect("failed to install Ctrl-C handler");
+}
+
+/// Custom training loop with video frame generation support
+#[allow(clippy::too_many_arguments)]
+fn train_with_video_support<B, O, S>(
+    mut model: Transformer<B>,
+    mut optimizer: O,
+    mut lr_scheduler: S,
+    dataloader_train: std::sync::Arc<dyn burn::data::dataloader::DataLoader<B, ModularAdditionBatch<B>>>,
+    dataloader_val: std::sync::Arc<dyn burn::data::dataloader::DataLoader<B::InnerBackend, ModularAdditionBatch<B::InnerBackend>>>,
+    num_epochs: usize,
+    artifact_dir: &str,
+    device: &B::Device,
+    video_mode: bool,
+) -> Transformer<B>
+where
+    B: AutodiffBackend,
+    O: burn::optim::Optimizer<Transformer<B>, B>,
+    S: burn::optim::lr_scheduler::LrScheduler,
+    B::Device: Clone,
+{
+    use burn::{
+        module::{AutodiffModule, Module},
+        prelude::ElementConversion,
+        record::Recorder,
+        train::{TrainStep, ValidStep},
+    };
+
+    // Create directories
+    fs::create_dir_all(format!("{}/checkpoint", artifact_dir)).ok();
+    fs::create_dir_all(format!("{}/train", artifact_dir)).ok();
+    fs::create_dir_all(format!("{}/valid", artifact_dir)).ok();
+
+    if video_mode {
+        fs::create_dir_all(format!("{}/video_frames", artifact_dir)).ok();
+    }
+
+    for epoch in 1..=num_epochs {
+        println!("Epoch {}/{}", epoch, num_epochs);
+
+        // === TRAINING PHASE ===
+        let mut train_loss_sum = 0.0;
+        let mut train_batches = 0;
+
+        for batch in dataloader_train.iter() {
+            // Forward pass using TrainStep trait
+            let train_output = TrainStep::step(&model, batch);
+            let loss_value: f32 = train_output.item.loss.clone().into_scalar().elem();
+
+            // Update model with gradients
+            model = optimizer.step(lr_scheduler.step(), model, train_output.grads);
+
+            // Track metrics
+            train_loss_sum += loss_value as f64;
+            train_batches += 1;
+        }
+
+        let train_loss_avg = train_loss_sum / train_batches as f64;
+
+        // === VALIDATION PHASE ===
+        let model_valid = model.valid();
+        let mut val_loss_sum = 0.0;
+        let mut val_batches = 0;
+
+        for batch in dataloader_val.iter() {
+            let val_output = ValidStep::step(&model_valid, batch);
+            let loss_value: f32 = val_output.loss.clone().into_scalar().elem();
+
+            val_loss_sum += loss_value as f64;
+            val_batches += 1;
+        }
+
+        let val_loss_avg = val_loss_sum / val_batches as f64;
+
+        // Print epoch summary
+        println!("  Train Loss: {:.4}, Val Loss: {:.4}", train_loss_avg, val_loss_avg);
+
+        // === SAVE CHECKPOINT ===
+        let checkpoint_path = format!("{}/checkpoint/model-{}.mpk", artifact_dir, epoch);
+        let record = model.clone().into_record();
+        if let Err(e) = CompactRecorder::new().record(record, checkpoint_path.into()) {
+            eprintln!("Warning: Could not save checkpoint at epoch {}: {}", epoch, e);
+        }
+
+        // === GENERATE VIDEO FRAME ===
+        if video_mode {
+            generate_single_video_frame(&model, epoch, artifact_dir, device);
+        }
+    }
+
+    model
+}
+
+/// Generate a single video frame for the current epoch
+fn generate_single_video_frame<B: AutodiffBackend>(
+    model: &Transformer<B>,
+    epoch: usize,
+    artifact_dir: &str,
+    _device: &B::Device,
+) where
+    B::Device: Clone,
+{
+    let video_dir = Path::new(artifact_dir).join("video_frames");
+
+    // Extract embeddings
+    let embeddings = analysis::extract_all_embeddings(model);
+
+    if embeddings.is_empty() || embeddings[0].is_empty() {
+        return;
+    }
+
+    // Select 7 interesting dimensions (high variance)
+    let interesting_dims = plotting::select_interesting_dimensions(&embeddings, 7);
+
+    if interesting_dims.len() < 7 {
+        return;
+    }
+
+    let dims: [usize; 7] = [
+        interesting_dims[0],
+        interesting_dims[1],
+        interesting_dims[2],
+        interesting_dims[3],
+        interesting_dims[4],
+        interesting_dims[5],
+        interesting_dims[6],
+    ];
+
+    // Generate 7x7 embedding grid with zero-padded frame number
+    let output_path = format!(
+        "{}/frame_{:05}_epoch_{:05}.png",
+        video_dir.display(),
+        epoch,
+        epoch
+    );
+
+    let title = format!("Embedding Evolution - Epoch {}", epoch);
+
+    if let Err(e) = plotting::plot_embedding_grid_fast(&embeddings, &dims, &output_path, &title) {
+        eprintln!("Warning: Could not generate video frame for epoch {}: {}", epoch, e);
+    } else if epoch % 100 == 0 {
+        println!("  📹 Generated video frame for epoch {}", epoch);
+    }
 }
 
 fn main() {
@@ -146,16 +287,18 @@ fn main() {
     println!("{}", "=".repeat(80));
     println!();
 
-    let training = SupervisedTraining::new(artifact_dir, dataloader_train, dataloader_val)
-        .metrics((AccuracyMetric::new(), LossMetric::new()))
-        .with_file_checkpointer(CompactRecorder::new())
-        .num_epochs(num_epochs)
-        .with_training_strategy(TrainingStrategy::SingleDevice(device.clone()))
-        .summary();
-
-    let learner = Learner::new(model, optim, lr_scheduler);
-    let result = training.run(learner);
-    let model = result.model;
+    // Use custom training loop with video frame support
+    let model = train_with_video_support(
+        model,
+        optim,
+        lr_scheduler,
+        dataloader_train,
+        dataloader_val,
+        num_epochs,
+        artifact_dir,
+        &device,
+        video_mode,
+    );
 
     // Save labeled checkpoints at key epochs for grokking analysis
     println!();
@@ -919,17 +1062,10 @@ fn main() {
 
     println!();
 
-    // Generate video frames if --video flag was set
     if video_mode {
         println!();
-        println!("📹 Video Frame Generation:");
-        println!();
-        generate_video_frames(
-            artifact_dir,
-            &device,
-            grokking_epoch,
-            num_epochs,
-        );
+        println!("📹 Video frames were generated during training!");
+        println!("   💡 Create video with: ffmpeg -framerate 10 -pattern_type glob -i 'artifacts/video_frames/frame_*.png' -c:v libx264 -pix_fmt yuv420p grokking_evolution.mp4");
     }
 
     println!();
@@ -1340,7 +1476,7 @@ fn export_activation_surfaces(
 
 /// Generate video frames showing embedding evolution throughout training
 ///
-/// Creates a sequence of 7x7 embedding grid visualizations at regular intervals,
+/// Creates a sequence of 7x7 embedding grid visualizations for every epoch,
 /// suitable for creating an animation of the grokking phenomenon.
 fn generate_video_frames(
     artifact_dir: &str,
@@ -1356,33 +1492,8 @@ fn generate_video_frames(
         return;
     }
 
-    // Define frame schedule: dense early, sparse later
-    // This captures the rapid changes during memorization and grokking
-    let mut frame_epochs = vec![1, 10, 25, 50, 75, 100]; // Early phase (0-100)
-
-    // Memorization phase (100-500)
-    for e in (150..=500).step_by(50) {
-        if e <= num_epochs {
-            frame_epochs.push(e);
-        }
-    }
-
-    // Plateau and grokking phase (500-1000)
-    for e in (550..=1000).step_by(50) {
-        if e <= num_epochs {
-            frame_epochs.push(e);
-        }
-    }
-
-    // Post-grokking phase (1000+)
-    for e in (1100..=num_epochs).step_by(100) {
-        frame_epochs.push(e);
-    }
-
-    // Always include the final epoch
-    if !frame_epochs.contains(&num_epochs) {
-        frame_epochs.push(num_epochs);
-    }
+    // Generate a frame for every epoch
+    let frame_epochs: Vec<usize> = (1..=num_epochs).collect();
 
     println!("   📹 Will generate {} frames", frame_epochs.len());
 
