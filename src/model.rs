@@ -342,6 +342,45 @@ mod tests {
     }
 
     #[test]
+    fn test_forward_with_token_weights_batch_size_one() {
+        let device = Default::default();
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with batch_size=1 (edge case for squeeze/reshape operations)
+        let input = Tensor::<TestBackend, 2, Int>::from_data([[5, 10, 113]], &device);
+
+        // Use the model's actual token embedding weights
+        // token_weights shape: [vocab_size, d_model]
+        let token_weights = model.token_embedding_weights();
+
+        // Forward pass with token weights should not panic
+        let logits = model.forward_with_token_weights(input, token_weights);
+
+        // Check output shape: [1, vocab_size]
+        assert_eq!(logits.dims(), [1, ModularAdditionDataset::vocab_size()]);
+    }
+
+    #[test]
+    fn test_forward_with_mlp_activations_batch_size_one() {
+        let device = Default::default();
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with batch_size=1 (edge case for squeeze/reshape operations)
+        let input = Tensor::<TestBackend, 2, Int>::from_data([[5, 10, 113]], &device);
+
+        // Forward pass should return both logits and MLP activations without panicking
+        let (logits, mlp_acts) = model.forward_with_mlp_activations(input);
+
+        // Check output shapes:
+        // - logits: [1, vocab_size]
+        // - mlp_acts: [1, d_ff] (MLP hidden dimension)
+        assert_eq!(logits.dims(), [1, ModularAdditionDataset::vocab_size()]);
+        assert_eq!(mlp_acts.dims(), [1, config.d_ff]);
+    }
+
+    #[test]
     fn test_config_matches_spec() {
         let config = TransformerConfig::default();
         assert_eq!(config.d_model, 128);

@@ -1209,4 +1209,98 @@ mod tests {
                 || err.contains("peak to median")
         );
     }
+
+    #[test]
+    fn test_compute_restricted_loss_batch_size_one() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        // Create a small dataset and model
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with batch_size=1 (edge case for squeeze/reshape operations)
+        let result = compute_restricted_loss(&model, &dataset, &device, 3, 1);
+
+        // Should not panic and should return a valid loss value
+        assert!(result.is_ok());
+        let loss = result.unwrap();
+        assert!(loss >= 0.0, "loss should be non-negative");
+        assert!(loss.is_finite(), "loss should be finite");
+    }
+
+    #[test]
+    fn test_compute_excluded_loss_batch_size_one() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        // Create a small dataset and model
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with batch_size=1 (edge case for squeeze/reshape operations)
+        let result = compute_excluded_loss(&model, &dataset, &device, 3, 1);
+
+        // Should not panic and should return a valid loss value
+        assert!(result.is_ok());
+        let loss = result.unwrap();
+        assert!(loss >= 0.0, "loss should be non-negative");
+        assert!(loss.is_finite(), "loss should be finite");
+    }
+
+    #[test]
+    fn test_compute_restricted_loss_various_batch_sizes() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with different batch sizes including edge cases
+        for batch_size in [1, 2, 5, 10, 100] {
+            let result = compute_restricted_loss(&model, &dataset, &device, 3, batch_size);
+            assert!(result.is_ok(), "batch_size={} should succeed", batch_size);
+            let loss = result.unwrap();
+            assert!(loss >= 0.0 && loss.is_finite(),
+                "batch_size={} should produce valid loss", batch_size);
+        }
+    }
+
+    #[test]
+    fn test_compute_excluded_loss_various_batch_sizes() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with different batch sizes including edge cases
+        for batch_size in [1, 2, 5, 10, 100] {
+            let result = compute_excluded_loss(&model, &dataset, &device, 3, batch_size);
+            assert!(result.is_ok(), "batch_size={} should succeed", batch_size);
+            let loss = result.unwrap();
+            assert!(loss >= 0.0 && loss.is_finite(),
+                "batch_size={} should produce valid loss", batch_size);
+        }
+    }
 }
