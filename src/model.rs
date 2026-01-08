@@ -105,7 +105,8 @@ impl<B: Backend> Transformer<B> {
         let input = Tensor::<B, 1, Int>::from_ints(token_vec.as_slice(), &device)
             .reshape([1, 1]);
         let embedding = self.token_embedding.forward(input); // [1, 1, embedding_dim]
-        embedding.squeeze() // Remove all size-1 dimensions -> [embedding_dim]
+        // Reshape [1, 1, d_model] -> [d_model]
+        embedding.reshape([self.d_model])
     }
 
     pub fn token_embedding_weights(&self) -> Tensor<B, 2> {
@@ -139,8 +140,9 @@ impl<B: Backend> Transformer<B> {
         }
 
         // Take the last position (after '=') for prediction
-        let last_hidden = hidden.slice([0..batch_size, (seq_length - 1)..seq_length])
-            .squeeze();
+        // Select the last token: [batch_size, seq_length, d_model] -> [batch_size, d_model]
+        let last_hidden = hidden.slice([0..batch_size, (seq_length - 1)..seq_length, 0..self.d_model])
+            .reshape([batch_size, self.d_model]);
 
         // Project to vocabulary
         self.lm_head.forward(last_hidden)
@@ -174,9 +176,10 @@ impl<B: Backend> Transformer<B> {
         }
 
         // Take the last position (after '=') for prediction
+        // Select the last token: [batch_size, seq_length, d_model] -> [batch_size, d_model]
         let last_hidden = hidden
-            .slice([0..batch_size, (seq_length - 1)..seq_length])
-            .squeeze();
+            .slice([0..batch_size, (seq_length - 1)..seq_length, 0..self.d_model])
+            .reshape([batch_size, self.d_model]);
 
         // Project to vocabulary
         self.lm_head.forward(last_hidden)
@@ -209,13 +212,16 @@ impl<B: Backend> Transformer<B> {
         }
 
         let mlp_acts = last_mlp_acts.expect("transformer must have at least one layer");
+        // Select the last token activations: [batch_size, seq_length, d_ff] -> [batch_size, d_ff]
+        let d_ff = mlp_acts.dims()[2];
         let last_mlp = mlp_acts
-            .slice([0..batch_size, (seq_length - 1)..seq_length])
-            .squeeze();
+            .slice([0..batch_size, (seq_length - 1)..seq_length, 0..d_ff])
+            .reshape([batch_size, d_ff]);
 
+        // Select the last token: [batch_size, seq_length, d_model] -> [batch_size, d_model]
         let last_hidden = hidden
-            .slice([0..batch_size, (seq_length - 1)..seq_length])
-            .squeeze();
+            .slice([0..batch_size, (seq_length - 1)..seq_length, 0..self.d_model])
+            .reshape([batch_size, self.d_model]);
 
         let logits = self.lm_head.forward(last_hidden);
         (logits, last_mlp)
@@ -317,6 +323,22 @@ mod tests {
 
         // Check output shape: [batch_size, vocab_size]
         assert_eq!(logits.dims(), [batch_size, ModularAdditionDataset::vocab_size()]);
+    }
+
+    #[test]
+    fn test_forward_pass_batch_size_one() {
+        let device = Default::default();
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with batch_size=1 (edge case that caused squeeze bug)
+        let input = Tensor::<TestBackend, 2, Int>::from_data([[5, 10, 113]], &device);
+
+        // Forward pass should not panic
+        let logits = model.forward(input);
+
+        // Check output shape: [1, vocab_size]
+        assert_eq!(logits.dims(), [1, ModularAdditionDataset::vocab_size()]);
     }
 
     #[test]

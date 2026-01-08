@@ -298,8 +298,8 @@ pub fn compute_restricted_loss<B: Backend>(
 
         let logits = model.forward_with_token_weights(inputs, token_weights.clone());
         let loss = loss_fn.forward(logits, targets);
-        let loss_value: f64 = loss.into_data().to_vec().unwrap().get(0).copied().unwrap_or(0.0);
-        total_loss += loss_value;
+        let loss_value: f32 = loss.into_data().to_vec::<f32>().unwrap().get(0).copied().unwrap_or(0.0);
+        total_loss += loss_value as f64;
         total_batches += 1;
     }
 
@@ -356,8 +356,8 @@ pub fn compute_excluded_loss<B: Backend>(
 
         let logits = model.forward_with_token_weights(inputs, token_weights.clone());
         let loss = loss_fn.forward(logits, targets);
-        let loss_value: f64 = loss.into_data().to_vec().unwrap().get(0).copied().unwrap_or(0.0);
-        total_loss += loss_value;
+        let loss_value: f32 = loss.into_data().to_vec::<f32>().unwrap().get(0).copied().unwrap_or(0.0);
+        total_loss += loss_value as f64;
         total_batches += 1;
     }
 

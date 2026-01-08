@@ -1286,7 +1286,8 @@ fn test_all_examples<B: Backend>(
             .reshape([batch_len, 3]);
 
         let logits = model.forward(inputs);
-        let predictions = logits.argmax(1).squeeze::<1>();
+        // argmax(1) already returns [batch_size] (1D), no squeeze needed
+        let predictions = logits.argmax(1);
         let predictions_vec: Vec<i32> = predictions.into_data().to_vec().unwrap();
 
         let correct = predictions_vec
@@ -1483,7 +1484,8 @@ pub fn test_specific_examples<B: Backend>(
             .reshape([1, 3]);
 
         let logits = model.forward(input);
-        let prediction = logits.argmax(1).squeeze::<1>();
+        // argmax(1) already returns [1] (1D), no squeeze needed
+        let prediction = logits.argmax(1);
         let pred_value: i32 = prediction.into_data().to_vec().unwrap()[0];
 
         let correct = if pred_value == expected as i32 { "✓" } else { "✗" };
