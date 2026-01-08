@@ -1303,4 +1303,263 @@ mod tests {
                 "batch_size={} should produce valid loss", batch_size);
         }
     }
+
+    #[test]
+    fn test_compute_restricted_loss_zero_batch_size() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with batch_size=0 (should return error)
+        let result = compute_restricted_loss(&model, &dataset, &device, 3, 0);
+        assert!(result.is_err(), "batch_size=0 should fail");
+        assert_eq!(result.unwrap_err(), "batch_size must be greater than 0");
+    }
+
+    #[test]
+    fn test_compute_excluded_loss_zero_batch_size() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with batch_size=0 (should return error)
+        let result = compute_excluded_loss(&model, &dataset, &device, 3, 0);
+        assert!(result.is_err(), "batch_size=0 should fail");
+        assert_eq!(result.unwrap_err(), "batch_size must be greater than 0");
+    }
+
+    #[test]
+    fn test_compute_restricted_loss_top_k_zero() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with top_k=0 (should zero out all frequencies)
+        let result = compute_restricted_loss(&model, &dataset, &device, 0, 10);
+        assert!(result.is_ok(), "top_k=0 should succeed");
+        let loss = result.unwrap();
+        // Loss should be high since all frequencies are removed
+        assert!(loss > 0.0 && loss.is_finite(), "top_k=0 should produce high loss");
+    }
+
+    #[test]
+    fn test_compute_excluded_loss_top_k_zero() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with top_k=0 (should preserve all frequencies)
+        let result = compute_excluded_loss(&model, &dataset, &device, 0, 10);
+        assert!(result.is_ok(), "top_k=0 should succeed");
+        let loss = result.unwrap();
+        assert!(loss > 0.0 && loss.is_finite(), "top_k=0 should produce valid loss");
+    }
+
+    #[test]
+    fn test_compute_restricted_loss_large_top_k() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with very large top_k (should keep all frequencies)
+        let result = compute_restricted_loss(&model, &dataset, &device, 1000, 10);
+        assert!(result.is_ok(), "large top_k should succeed");
+        let loss = result.unwrap();
+        assert!(loss > 0.0 && loss.is_finite(), "large top_k should produce valid loss");
+    }
+
+    #[test]
+    fn test_compute_excluded_loss_large_top_k() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test with very large top_k (should remove all frequencies, result in zeros)
+        let result = compute_excluded_loss(&model, &dataset, &device, 1000, 10);
+        assert!(result.is_ok(), "large top_k should succeed");
+        let loss = result.unwrap();
+        // Loss should be high since all frequencies are removed
+        assert!(loss > 0.0 && loss.is_finite(), "large top_k should produce high loss");
+    }
+
+    #[test]
+    fn test_compute_restricted_loss_type_consistency() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test that result is consistently f64 (not f32)
+        let result = compute_restricted_loss(&model, &dataset, &device, 3, 10);
+        assert!(result.is_ok());
+        let loss: f64 = result.unwrap();
+
+        // Verify we can perform f64 operations without type coercion
+        let doubled = loss * 2.0f64;
+        assert!(doubled.is_finite());
+
+        // Verify precision is maintained (f64 should have more precision than f32)
+        let precision_test = loss + 1e-10;
+        assert!(precision_test > loss, "f64 precision should distinguish small differences");
+    }
+
+    #[test]
+    fn test_compute_excluded_loss_type_consistency() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test that result is consistently f64 (not f32)
+        let result = compute_excluded_loss(&model, &dataset, &device, 3, 10);
+        assert!(result.is_ok());
+        let loss: f64 = result.unwrap();
+
+        // Verify we can perform f64 operations without type coercion
+        let doubled = loss * 2.0f64;
+        assert!(doubled.is_finite());
+
+        // Verify precision is maintained (f64 should have more precision than f32)
+        let precision_test = loss + 1e-10;
+        assert!(precision_test > loss, "f64 precision should distinguish small differences");
+    }
+
+    #[test]
+    fn test_compute_restricted_vs_excluded_complementary() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Test relationship between restricted and excluded losses
+        // When top_k=0:
+        // - restricted should keep 0 frequencies (all zeros)
+        // - excluded should remove 0 frequencies (keep all)
+        let restricted_0 = compute_restricted_loss(&model, &dataset, &device, 0, 10).unwrap();
+        let excluded_0 = compute_excluded_loss(&model, &dataset, &device, 0, 10).unwrap();
+
+        // Both should produce valid positive losses
+        assert!(restricted_0 > 0.0 && restricted_0.is_finite());
+        assert!(excluded_0 > 0.0 && excluded_0.is_finite());
+
+        // When top_k=5 (moderate filtering):
+        // - restricted keeps only top 5 frequencies
+        // - excluded removes top 5 frequencies
+        let restricted_5 = compute_restricted_loss(&model, &dataset, &device, 5, 10).unwrap();
+        let excluded_5 = compute_excluded_loss(&model, &dataset, &device, 5, 10).unwrap();
+
+        // Both should produce valid positive losses
+        assert!(restricted_5 > 0.0 && restricted_5.is_finite());
+        assert!(excluded_5 > 0.0 && excluded_5.is_finite());
+
+        // Sanity check: losses should be different for different top_k values
+        assert_ne!(restricted_0, restricted_5,
+            "restricted loss should differ for different top_k values");
+    }
+
+    #[test]
+    fn test_compute_restricted_loss_larger_batch_than_dataset() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Use batch size larger than dataset size
+        let dataset_len = dataset.len();
+        let large_batch = dataset_len + 1000;
+
+        let result = compute_restricted_loss(&model, &dataset, &device, 3, large_batch);
+        assert!(result.is_ok(), "large batch size should succeed");
+        let loss = result.unwrap();
+        assert!(loss > 0.0 && loss.is_finite(), "should produce valid loss");
+    }
+
+    #[test]
+    fn test_compute_excluded_loss_larger_batch_than_dataset() {
+        use crate::data::ModularAdditionDataset;
+        use crate::model::TransformerConfig;
+        use burn::backend::NdArray;
+
+        type TestBackend = NdArray;
+
+        let device = Default::default();
+        let dataset = ModularAdditionDataset::new(true, 42);
+        let config = TransformerConfig::default();
+        let model = config.init::<TestBackend>(&device);
+
+        // Use batch size larger than dataset size
+        let dataset_len = dataset.len();
+        let large_batch = dataset_len + 1000;
+
+        let result = compute_excluded_loss(&model, &dataset, &device, 3, large_batch);
+        assert!(result.is_ok(), "large batch size should succeed");
+        let loss = result.unwrap();
+        assert!(loss > 0.0 && loss.is_finite(), "should produce valid loss");
+    }
 }
