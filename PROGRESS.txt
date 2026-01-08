@@ -377,3 +377,10 @@
 - Code compiles cleanly with all 78 tests passing
 - Suggestions: Next task is MechInt-mx2 (suppress video frame debug messages)
 
+## [2026-01-08 17:05:00] Completed MechInt-mx2
+- Removed "💾 Saving image to..." debug messages from plot_embedding_grid_3x3() and plot_embedding_grid_fast()
+- Messages cluttered training output during video frame generation (especially with --video flag)
+- Kept useful status messages: "✅ Embedding grid rendered in X.XXs" and "📊 Embedding grid plot saved to..."
+- Code compiles successfully with zero errors
+- Suggestions: Check bd ready for next available tasks
+
