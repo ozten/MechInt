@@ -336,3 +336,14 @@
 - All 26 analysis module tests pass (76 total library tests pass, 1 pre-existing failure in training_config)
 - Test count increased from 64 to 76 passing tests (12 new tests added)
 - Suggestions: Next tasks are MechInt-1l9 (integration test for mini training loop) or MechInt-5b2 (property tests)
+
+## [2026-01-08 08:39:12] Completed MechInt-1l9
+- Added comprehensive integration tests in tests/integration_test.rs for end-to-end training validation
+- test_mini_training_loop_completes_without_panic: Runs 10 epochs to verify full training loop completes without panics
+- test_mini_training_loop_with_batch_size_variations: Tests edge cases with batch_size=1 and batch_size=16 (2 epochs each)
+- Tests verify model forward/backward passes, optimizer updates, metric recording, and checkpoint saving work correctly
+- Uses NdArray backend for fast CPU-only testing (no GPU required, runs in ~66s)
+- Would have caught squeeze/reshape bugs that only appeared during training validation
+- Both integration tests pass successfully
+- Total test count: 76 library tests + 2 integration tests = 78 passing tests
+- Suggestions: Next task is MechInt-5b2 (property tests for random batch sizes)
