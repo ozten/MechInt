@@ -109,8 +109,8 @@ where
                 .output
                 .clone()
                 .argmax(1)
-                .flatten::<1>(0, 1);
-            let targets = train_output.item.targets.clone().flatten::<1>(0, 1);
+                .squeeze::<1>();
+            let targets = train_output.item.targets.clone();
             let batch_size = targets.dims()[0];
             let correct = predictions.equal(targets).int().sum().into_scalar().elem::<i32>();
 
@@ -140,8 +140,8 @@ where
             let loss_value: f32 = val_output.loss.clone().into_scalar().elem();
 
             // Compute accuracy
-            let predictions = val_output.output.clone().argmax(1).flatten::<1>(0, 1);
-            let targets = val_output.targets.clone().flatten::<1>(0, 1);
+            let predictions = val_output.output.clone().argmax(1).squeeze::<1>();
+            let targets = val_output.targets.clone();
             let batch_size = targets.dims()[0];
             let correct = predictions.equal(targets).int().sum().into_scalar().elem::<i32>();
 
