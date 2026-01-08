@@ -100,3 +100,14 @@
 - All 54 library tests pass, no deprecated API warnings from clippy
 - Library and binaries compile successfully with Burn 0.20.0-pre.6
 - Suggestions: check bd ready for next available task
+## [2026-01-08 00:45:00] Completed MechInt-3is
+- Integrated restricted/excluded loss metrics into training loop to detect internal restructuring
+- Added RestrictedLossHistory struct and save/load methods (mirrors ExcludedLossHistory)
+- Added RestrictedLossDropConfig and verify_restricted_loss_drop function in verify.rs
+- Metrics computed at key checkpoints: epoch 100 (~step 1k), epoch 500 (~step 5k), grokking, and final
+- Both restricted and excluded loss saved to JSON files in artifacts/
+- Added verification logic: restricted loss should drop BEFORE validation accuracy improves
+- Added verification logic: excluded loss should spike as model switches to Fourier algorithm
+- Added 2 comprehensive unit tests for restricted loss drop verification
+- All 56 library tests pass (added 2 new tests)
+- Suggestions: next tasks are visualization pipeline (MechInt-c0w) and automatic grokking detection (MechInt-391)
