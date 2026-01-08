@@ -29,6 +29,15 @@ type WgpuBackend = Wgpu;
 type MyAutodiffBackend = Autodiff<WgpuBackend>;
 
 fn main() {
+    // Parse command-line arguments
+    let args: Vec<String> = std::env::args().collect();
+    #[allow(unused_variables)] // Will be used in MechInt-u89 for video frame generation
+    let video_mode = args.contains(&"--video".to_string());
+
+    if video_mode {
+        println!("📹 Video mode enabled: will generate frame-by-frame visualizations");
+    }
+
     // Load config from environment variables (for parameter sweeps) or use defaults
     let training_config = TrainingConfig::from_env();
     training_config
