@@ -134,3 +134,16 @@
 - Added tempfile dev dependency for test isolation
 - Expected to detect grokking around step ~7,000 (epoch ~700) in real training runs
 - Suggestions: next tasks are visualization pipeline (MechInt-c0w) and weight norm tracking (MechInt-fi4)
+## [2026-01-08 01:30:00] Completed MechInt-fi4
+- Integrated weight norm tracking at key checkpoints to monitor weight decay mechanism
+- Compute model L2 norm (token embeddings) at: step 0, epochs 100/500, grokking transition, final
+- Save weight norm history to artifacts/weight_norm_history.json
+- Added weight norm decay verification with default config (10% relative decrease threshold)
+- Verification confirms weight decay drives transition: high-norm memorization → gradual decay → sharp drop at grok → low-norm generalization
+- Expected timeline: 
+  * Step 0-1k (epoch 0-100): High norms during memorization phase
+  * Step 1k-7k (epoch 100-700): Gradual norm decrease during plateau
+  * Step ~7k (epoch ~700): Sharp norm drop at grokking transition
+  * Step 7k+ (epoch 700+): Low norm stabilization in generalizing circuit
+- All 56 library tests pass, code compiles cleanly
+- Suggestions: next task is visualization pipeline (MechInt-c0w) to plot weight norm evolution alongside loss/accuracy curves
