@@ -888,7 +888,6 @@ fn token_to_rgb(token_value: usize, p: usize) -> Rgb<u8> {
 
 /// Fast 7×7 embedding grid using direct pixel manipulation
 /// NOTE: Alternative visualization approach - reserved for future use
-#[allow(dead_code)]
 pub fn plot_embedding_grid_fast(
     embeddings: &[Vec<f64>],
     dimensions: &[usize; 7],
@@ -956,7 +955,6 @@ pub fn plot_embedding_grid_fast(
 }
 
 /// Render dimension vs index plot into a cell
-#[allow(dead_code)]
 fn render_dimension_plot(
     img: &mut RgbImage,
     embeddings: &[Vec<f64>],
@@ -1009,7 +1007,6 @@ fn render_dimension_plot(
 }
 
 /// Render scatter plot into a cell
-#[allow(dead_code)]
 fn render_scatter_plot(
     img: &mut RgbImage,
     embeddings: &[Vec<f64>],
