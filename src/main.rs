@@ -711,15 +711,22 @@ fn main() {
     // Generate plots
     println!();
     println!("{}", "=".repeat(80));
-    println!("📊 Generating Plots");
+    println!("📊 Generating Visualizations");
     println!("{}", "=".repeat(80));
+    println!();
+
+    // Create visualization directory
+    let viz_dir = "artifacts/visualizations";
+    std::fs::create_dir_all(viz_dir).ok();
+
+    println!("📈 Core Grokking Plots:");
     println!();
 
     // Plot 1: Loss evolution (train and val)
     if let Err(e) = plotting::plot_loss_history_dual(
         &loss_history.train_snapshots,
         &loss_history.val_snapshots,
-        "plots/loss_evolution.png",
+        &format!("{}/loss_evolution.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate loss plot: {}", e);
     }
@@ -728,7 +735,7 @@ fn main() {
     if let Err(e) = plotting::plot_accuracy_history(
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/accuracy_evolution.png",
+        &format!("{}/accuracy_evolution.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate accuracy plot: {}", e);
     }
@@ -739,16 +746,20 @@ fn main() {
         &loss_history.val_snapshots,
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/grokking_combined.png",
+        &format!("{}/grokking_combined.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate combined plot: {}", e);
     }
+
+    println!();
+    println!("📊 Log-Scale Snake Curve Plots:");
+    println!();
 
     // Plot 3b: Loss evolution with LOG SCALE (for paper Figure 1)
     if let Err(e) = plotting::plot_loss_history_dual_logscale(
         &loss_history.train_snapshots,
         &loss_history.val_snapshots,
-        "plots/loss_evolution_logscale.png",
+        &format!("{}/loss_evolution_logscale.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate log-scale loss plot: {}", e);
     }
@@ -757,7 +768,7 @@ fn main() {
     if let Err(e) = plotting::plot_accuracy_history_logscale(
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/accuracy_evolution_logscale.png",
+        &format!("{}/accuracy_evolution_logscale.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate log-scale accuracy plot: {}", e);
     }
@@ -768,10 +779,14 @@ fn main() {
         &loss_history.val_snapshots,
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/grokking_combined_logscale.png",
+        &format!("{}/grokking_combined_logscale.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate log-scale combined plot: {}", e);
     }
+
+    println!();
+    println!("🔬 FFT Analysis Plots:");
+    println!();
 
     // Plot 4: FFT frequency distribution
     let fft_freq_data: Vec<(usize, usize, f64)> = fft_analysis
@@ -781,7 +796,7 @@ fn main() {
         .collect();
 
     if let Err(e) =
-        plotting::plot_fft_frequency_distribution(&fft_freq_data, "plots/fft_frequencies.png")
+        plotting::plot_fft_frequency_distribution(&fft_freq_data, &format!("{}/fft_frequencies.png", viz_dir))
     {
         eprintln!("⚠️  Warning: Could not generate FFT frequency plot: {}", e);
     }
@@ -798,9 +813,24 @@ fn main() {
         })
         .collect();
 
-    if let Err(e) = plotting::plot_fft_spectra(&token_spectra, "plots/fft_spectra.png") {
+    if let Err(e) = plotting::plot_fft_spectra(&token_spectra, &format!("{}/fft_spectra.png", viz_dir)) {
         eprintln!("⚠️  Warning: Could not generate FFT spectra plot: {}", e);
     }
+
+    println!();
+    println!("🎨 Embedding Visualizations:");
+    println!();
+
+    // Generate embedding grid visualizations for key checkpoints
+    generate_checkpoint_embeddings_visualization(
+        artifact_dir,
+        &device,
+        grokking_epoch,
+        num_epochs,
+        viz_dir,
+    );
+
+    println!();
 
     println!();
     println!("{}", "=".repeat(80));
@@ -977,6 +1007,98 @@ fn copy_checkpoint_set(
     }
 
     Ok(())
+}
+
+/// Generate embedding visualizations for key checkpoints
+fn generate_checkpoint_embeddings_visualization(
+    artifact_dir: &str,
+    device: &WgpuDevice,
+    grokking_epoch: Option<usize>,
+    num_epochs: usize,
+    viz_dir: &str,
+) {
+    println!("   Generating embedding visualizations for key checkpoints...");
+
+    // Define checkpoints to visualize
+    let mut checkpoints = vec![
+        (1, "initial"),
+        (100, "memorization_e100"),
+        (500, "plateau_e500"),
+    ];
+
+    // Add grokking checkpoint if detected
+    if let Some(epoch) = grokking_epoch {
+        checkpoints.push((epoch, "grokking"));
+    }
+
+    // Add final checkpoint
+    checkpoints.push((num_epochs, "final"));
+
+    for (epoch, label) in checkpoints {
+        // Try labeled checkpoint first (for initial/grokking/final)
+        let labeled_path = Path::new(artifact_dir)
+            .join("checkpoint_labeled")
+            .join(format!("model-{}.mpk", label));
+
+        let checkpoint_path = if labeled_path.exists() {
+            labeled_path
+        } else {
+            // Fall back to epoch-based checkpoint
+            Path::new(artifact_dir)
+                .join("checkpoint")
+                .join(format!("model-{}.mpk", epoch))
+        };
+
+        if !checkpoint_path.exists() {
+            println!("   ⚠️  Skipping {}: checkpoint not found", label);
+            continue;
+        }
+
+        match checkpoint::load_checkpoint::<MyAutodiffBackend>(
+            checkpoint_path.to_str().unwrap(),
+            device,
+        ) {
+            Ok(model) => {
+                // Extract embeddings
+                let embeddings = analysis::extract_all_embeddings(&model);
+
+                if embeddings.is_empty() || embeddings[0].is_empty() {
+                    println!("   ⚠️  Skipping {}: no embeddings found", label);
+                    continue;
+                }
+
+                // Select 3 interesting dimensions (high variance)
+                let interesting_dims = plotting::select_interesting_dimensions(&embeddings, 3);
+
+                if interesting_dims.len() < 3 {
+                    println!("   ⚠️  Skipping {}: insufficient dimensions", label);
+                    continue;
+                }
+
+                let dims: [usize; 3] = [
+                    interesting_dims[0],
+                    interesting_dims[1],
+                    interesting_dims[2],
+                ];
+
+                // Generate 3x3 embedding grid
+                let output_path = format!("{}/embeddings_3x3_{}.png", viz_dir, label);
+                let title = format!("Embedding Grid - {} (epoch {})", label, epoch);
+
+                match plotting::plot_embedding_grid_3x3(&embeddings, &dims, &output_path, &title) {
+                    Ok(_) => {
+                        println!("   ✅ Generated embedding grid for {}", label);
+                    }
+                    Err(e) => {
+                        eprintln!("   ⚠️  Could not generate embedding grid for {}: {}", label, e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("   ⚠️  Could not load checkpoint for {}: {}", label, e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
