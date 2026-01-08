@@ -255,3 +255,12 @@
 - All 58 library tests pass, code compiles cleanly
 - Dry-run and quick modes tested successfully
 - Suggestions: Infrastructure complete and ready for execution when GPU compute is available. All core implementation tasks finished.
+## [2026-01-08 02:45:00] Completed MechInt-nnn
+- Fixed critical P0 tensor dimension crash in post-training FFT analysis
+- Root cause: get_token_embedding() used .squeeze::<2>() expecting 3D->2D, but needed to remove both size-1 dims
+- Solution: Changed to .squeeze() to convert [1, 1, embedding_dim] -> [embedding_dim]
+- Updated return type from Tensor<B, 2> to Tensor<B, 1> (more semantically correct)
+- Updated analysis.rs comment to reflect correct tensor shape
+- All 58 library tests pass, release binary compiles successfully
+- Unblocks: FFT embedding visualization, video frame generation (video-1), advanced metrics computation
+- Suggestions: Next tasks are video-1 implementation tasks (MechInt-z5x, MechInt-9x2, MechInt-u89)
