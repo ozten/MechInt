@@ -71,6 +71,7 @@ where
         record::Recorder,
         train::{TrainStep, ValidStep},
     };
+    use indicatif::{ProgressBar, ProgressStyle};
 
     // Create directories
     fs::create_dir_all(format!("{}/checkpoint", artifact_dir)).ok();
@@ -81,17 +82,40 @@ where
         fs::create_dir_all(format!("{}/video_frames", artifact_dir)).ok();
     }
 
-    for epoch in 1..=num_epochs {
-        println!("Epoch {}/{}", epoch, num_epochs);
+    // Initialize progress bar
+    let pb = ProgressBar::new(num_epochs as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{msg}\n{bar:40.cyan/blue} {pos}/{len} [{elapsed_precise}<{eta_precise}]")
+            .expect("Valid template")
+            .progress_chars("=>-"),
+    );
 
+    for epoch in 1..=num_epochs {
         // === TRAINING PHASE ===
         let mut train_loss_sum = 0.0;
         let mut train_batches = 0;
+        let mut train_correct = 0;
+        let mut train_total = 0;
 
         for batch in dataloader_train.iter() {
             // Forward pass using TrainStep trait
             let train_output = TrainStep::step(&model, batch);
             let loss_value: f32 = train_output.item.loss.clone().into_scalar().elem();
+
+            // Compute accuracy
+            let predictions = train_output
+                .item
+                .output
+                .clone()
+                .argmax(1)
+                .flatten::<1>(0, 1);
+            let targets = train_output.item.targets.clone().flatten::<1>(0, 1);
+            let batch_size = targets.dims()[0];
+            let correct = predictions.equal(targets).int().sum().into_scalar().elem::<i32>();
+
+            train_correct += correct as usize;
+            train_total += batch_size;
 
             // Update model with gradients
             model = optimizer.step(lr_scheduler.step(), model, train_output.grads);
@@ -102,24 +126,41 @@ where
         }
 
         let train_loss_avg = train_loss_sum / train_batches as f64;
+        let train_acc = (train_correct as f64 / train_total as f64) * 100.0;
 
         // === VALIDATION PHASE ===
         let model_valid = model.valid();
         let mut val_loss_sum = 0.0;
         let mut val_batches = 0;
+        let mut val_correct = 0;
+        let mut val_total = 0;
 
         for batch in dataloader_val.iter() {
             let val_output = ValidStep::step(&model_valid, batch);
             let loss_value: f32 = val_output.loss.clone().into_scalar().elem();
+
+            // Compute accuracy
+            let predictions = val_output.output.clone().argmax(1).flatten::<1>(0, 1);
+            let targets = val_output.targets.clone().flatten::<1>(0, 1);
+            let batch_size = targets.dims()[0];
+            let correct = predictions.equal(targets).int().sum().into_scalar().elem::<i32>();
+
+            val_correct += correct as usize;
+            val_total += batch_size;
 
             val_loss_sum += loss_value as f64;
             val_batches += 1;
         }
 
         let val_loss_avg = val_loss_sum / val_batches as f64;
+        let val_acc = (val_correct as f64 / val_total as f64) * 100.0;
 
-        // Print epoch summary
-        println!("  Train Loss: {:.4}, Val Loss: {:.4}", train_loss_avg, val_loss_avg);
+        // Update progress bar with metrics
+        pb.set_message(format!(
+            "Epoch {} | TrnLoss: {:.4} TrnAcc: {:.1}% | ValLoss: {:.4} ValAcc: {:.1}%",
+            epoch, train_loss_avg, train_acc, val_loss_avg, val_acc
+        ));
+        pb.inc(1);
 
         // === SAVE CHECKPOINT ===
         let checkpoint_path = format!("{}/checkpoint/model-{}.mpk", artifact_dir, epoch);
@@ -133,6 +174,8 @@ where
             generate_single_video_frame(&model, epoch, artifact_dir, device);
         }
     }
+
+    pb.finish_with_message("Training complete!");
 
     model
 }
