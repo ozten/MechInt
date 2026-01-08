@@ -528,6 +528,113 @@ fn main() {
     }
 
     println!();
+    println!("{}", "=".repeat(80));
+    println!("🔬 Weight Norm Evolution (Weight Decay Mechanism)");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    let mut weight_norm_history = analysis::WeightNormHistory::new();
+
+    println!("🔍 Computing weight norms at key checkpoints...");
+    println!("   (Weight decay drives the transition from high-norm memorization to low-norm generalization)");
+    println!();
+
+    // Initial model (step 0)
+    let initial_norm = analysis::compute_model_weight_norm(&initial_model);
+    weight_norm_history.add_snapshot(0, initial_norm);
+    println!("   Step 0 - Weight norm: {:.4}", initial_norm);
+
+    // Checkpoint epochs (100, 500)
+    for &epoch in &checkpoint_epochs {
+        if epoch > num_epochs {
+            continue;
+        }
+
+        let checkpoint_step = (epoch - 1) * steps_per_epoch;
+        let checkpoint_path = format!("{artifact_dir}/checkpoint/model-{epoch}.mpk");
+
+        if !Path::new(&checkpoint_path).exists() {
+            continue;
+        }
+
+        match checkpoint::load_checkpoint::<MyAutodiffBackend>(&checkpoint_path, &device) {
+            Ok(checkpoint_model) => {
+                let norm = analysis::compute_model_weight_norm(&checkpoint_model);
+                weight_norm_history.add_snapshot(checkpoint_step, norm);
+                println!("   Step {} (epoch {}) - Weight norm: {:.4}", checkpoint_step, epoch, norm);
+            }
+            Err(err) => {
+                eprintln!("⚠️  Warning: Could not load checkpoint at epoch {}: {}", epoch, err);
+            }
+        }
+    }
+
+    // Grokking checkpoint (if detected)
+    if let Some(epoch) = grokking_epoch {
+        let grokking_step = (epoch - 1) * steps_per_epoch;
+        let grokking_path = format!("{artifact_dir}/checkpoint_labeled/model-grokking.mpk");
+        if Path::new(&grokking_path).exists() {
+            match checkpoint::load_checkpoint::<MyAutodiffBackend>(&grokking_path, &device) {
+                Ok(grokking_model) => {
+                    let norm = analysis::compute_model_weight_norm(&grokking_model);
+                    weight_norm_history.add_snapshot(grokking_step, norm);
+                    println!("   Step {} (GROK) - Weight norm: {:.4}", grokking_step, norm);
+                }
+                Err(err) => {
+                    eprintln!("⚠️  Warning: Could not load grokking checkpoint: {}", err);
+                }
+            }
+        } else {
+            eprintln!("⚠️  Warning: Grokking checkpoint not found at {}", grokking_path);
+        }
+    }
+
+    // Final model
+    let final_norm = analysis::compute_model_weight_norm(&model);
+    weight_norm_history.add_snapshot(total_steps, final_norm);
+    println!("   Step {} (FINAL) - Weight norm: {:.4}", total_steps, final_norm);
+
+    // Save weight norm history
+    if !weight_norm_history.snapshots.is_empty() {
+        let weight_norm_history_path = format!("{artifact_dir}/weight_norm_history.json");
+        if let Err(e) = weight_norm_history.save(&weight_norm_history_path) {
+            eprintln!("⚠️  Warning: Could not save weight norm history: {}", e);
+        } else {
+            println!("💾 Saved weight norm history to {}", weight_norm_history_path);
+        }
+
+        // Verify weight norm decay (should decrease during plateau phase)
+        if weight_norm_history.snapshots.len() >= 3 {
+            let decay_config = verify::WeightNormDecayConfig::default_for_grokking();
+
+            // Convert Vec<WeightNormSnapshot> to Vec<(usize, f64)>
+            let norm_tuples: Vec<(usize, f64)> = weight_norm_history
+                .snapshots
+                .iter()
+                .map(|s| (s.step, s.total_norm))
+                .collect();
+
+            // Get grokking step if available
+            let grok_step = grokking_epoch.map(|e| (e - 1) * steps_per_epoch);
+
+            match verify::verify_weight_norm_decay(&norm_tuples, grok_step, &decay_config) {
+                Ok(report) => {
+                    println!(
+                        "✅ Weight norm decay verified: {:.4} → {:.4} ({:.1}% decrease)",
+                        report.initial_norm,
+                        report.final_norm,
+                        (report.initial_norm - report.final_norm) / report.initial_norm * 100.0
+                    );
+                    println!("   ⚡ Weight decay successfully drove the transition to generalizing circuit!");
+                }
+                Err(err) => {
+                    eprintln!("ℹ️  Weight norm decay verification: {}", err);
+                }
+            }
+        }
+    }
+
+    println!();
 
     let pre_checkpoint = Path::new(artifact_dir).join("checkpoint").join("model-1.mpk");
     let post_checkpoint_grokking = Path::new(artifact_dir)
