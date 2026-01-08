@@ -790,7 +790,6 @@ pub fn plot_embedding_grid_3x3(
     }
 
     println!();
-    println!("   💾 Saving image to {}...", output_path);
     img.save(output_path)?;
     let render_elapsed = render_start.elapsed();
     println!("   ✅ Embedding grid rendered in {:.2?}", render_elapsed);
@@ -904,7 +903,6 @@ pub fn plot_embedding_grid_fast(
     }
 
     println!(); // newline after progress dots
-    println!("   💾 Saving image to {}...", output_path);
     img.save(output_path)?;
     println!("   ✅ Embedding grid saved!");
     println!("      Title: {}", title);
