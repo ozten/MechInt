@@ -730,117 +730,68 @@ pub fn plot_embedding_grid_3x3(
     title: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let p = embeddings.len(); // number of tokens
-    let point_size = 3; // slightly larger for visibility
-
-    // Create canvas for 3×3 grid
-    let root = BitMapBackend::new(output_path, (1200, 1200)).into_drawing_area();
-    root.fill(&BLACK)?; // Black background
-
-    // Split into 3×3 grid
-    let cell_areas = root.split_evenly((3, 3));
+    let cell_size: usize = 400;
+    let grid_size: usize = 3;
+    let total_size = cell_size * grid_size;
 
     let render_start = Instant::now();
+    println!("   🎨 Creating {}×{} pixel canvas...", total_size, total_size);
+    let mut img: RgbImage = ImageBuffer::from_pixel(
+        total_size as u32,
+        total_size as u32,
+        Rgb([0, 0, 0]),
+    );
+
     println!("   Rendering 3×3 grid ({} cells)...", 9);
     let mut cell_index = 0;
-    for row in 0..3 {
-        for col in 0..3 {
-            let idx = row * 3 + col;
+    for row in 0..grid_size {
+        for col in 0..grid_size {
+            let cell_start = Instant::now();
             cell_index += 1;
             print!("\r   Rendering 3×3 grid... {}/{}", cell_index, 9);
             use std::io::Write;
             std::io::stdout().flush().unwrap();
-            let area = &cell_areas[idx];
+
+            let x_offset = col * cell_size;
+            let y_offset = row * cell_size;
 
             if col == 0 {
-                // First column: embedding dimension vs token index
                 let dim = dimensions[row];
-
-                // Get dimension values for all tokens
-                let values: Vec<(usize, f64)> = (0..p)
-                    .map(|token| (token, embeddings[token][dim]))
-                    .collect();
-
-                // Find min/max for y-axis
-                let min_val = values.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-                let max_val = values.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
-                let margin = (max_val - min_val) * 0.1;
-
-                let mut chart = ChartBuilder::on(area)
-                    .margin(5)
-                    .build_cartesian_2d(
-                        0..p,
-                        (min_val - margin)..(max_val + margin),
-                    )?;
-
-                // Subtle gray crosshairs at origin
-                chart.configure_mesh()
-                    .disable_x_mesh()
-                    .disable_y_mesh()
-                    .x_labels(0)
-                    .y_labels(0)
-                    .axis_style(RGBAColor(50, 50, 50, 0.3))
-                    .draw()?;
-
-                // Plot points colored by token value
-                for (token, value) in values.iter() {
-                    let color = token_color(*token, p);
-                    chart.draw_series(std::iter::once(Circle::new(
-                        (*token, *value),
-                        point_size,
-                        color.filled(),
-                    )))?;
-                }
+                render_dimension_plot(
+                    &mut img,
+                    embeddings,
+                    dim,
+                    p,
+                    x_offset,
+                    y_offset,
+                    cell_size,
+                );
             } else {
-                // Pairwise scatter plot
                 let dim_x = dimensions[col];
                 let dim_y = dimensions[row];
-
-                // Extract x and y values
-                let points: Vec<(f64, f64)> = (0..p)
-                    .map(|token| (embeddings[token][dim_x], embeddings[token][dim_y]))
-                    .collect();
-
-                // Find min/max for axes
-                let min_x = points.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
-                let max_x = points.iter().map(|(x, _)| *x).fold(f64::NEG_INFINITY, f64::max);
-                let min_y = points.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
-                let max_y = points.iter().map(|(_, y)| *y).fold(f64::NEG_INFINITY, f64::max);
-
-                let margin_x = (max_x - min_x) * 0.1;
-                let margin_y = (max_y - min_y) * 0.1;
-
-                let mut chart = ChartBuilder::on(area)
-                    .margin(5)
-                    .build_cartesian_2d(
-                        (min_x - margin_x)..(max_x + margin_x),
-                        (min_y - margin_y)..(max_y + margin_y),
-                    )?;
-
-                // Subtle gray crosshairs at origin
-                chart.configure_mesh()
-                    .disable_x_mesh()
-                    .disable_y_mesh()
-                    .x_labels(0)
-                    .y_labels(0)
-                    .axis_style(RGBAColor(50, 50, 50, 0.3))
-                    .draw()?;
-
-                // Plot points colored by token value
-                for token in 0..p {
-                    let color = token_color(token, p);
-                    let (x, y) = points[token];
-                    chart.draw_series(std::iter::once(Circle::new(
-                        (x, y),
-                        point_size,
-                        color.filled(),
-                    )))?;
-                }
+                render_scatter_plot(
+                    &mut img,
+                    embeddings,
+                    dim_x,
+                    dim_y,
+                    p,
+                    x_offset,
+                    y_offset,
+                    cell_size,
+                );
             }
+
+            let cell_elapsed = cell_start.elapsed();
+            println!(
+                "\r   Rendered cell {}/9 in {:.2?}           ",
+                cell_index, cell_elapsed
+            );
         }
     }
 
-    println!(); // newline after progress update
-    root.present()?;
+    println!();
+    println!("   💾 Saving image to {}...", output_path);
+    img.save(output_path)?;
     let render_elapsed = render_start.elapsed();
     println!("   ✅ Embedding grid rendered in {:.2?}", render_elapsed);
     println!("   📊 Embedding grid plot saved to: {}", output_path);
