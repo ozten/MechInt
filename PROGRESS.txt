@@ -325,3 +325,14 @@
 - Test count increased from 58 to 64 passing tests (6 new tests added)
 - Suggestions: Next tasks are MechInt-efu (tests for compute_restricted_loss/compute_excluded_loss type safety) or MechInt-1l9 (integration test for mini training loop)
 
+
+## [2026-01-08 08:30:00] Completed MechInt-efu
+- Added 12 comprehensive unit tests for compute_restricted_loss and compute_excluded_loss functions
+- Tests cover error handling: batch_size=0 validation with proper error messages
+- Tests cover edge cases: top_k=0 (keep/remove no frequencies), large top_k, batch_size > dataset_len
+- Tests cover type consistency: f64 precision verification to catch f32/f64 type mismatch bugs
+- Tests cover loss computation correctness: various batch sizes (1,2,5,10,100) without panicking
+- Tests cover complementary behavior: restricted vs excluded loss relationships with different top_k
+- All 26 analysis module tests pass (76 total library tests pass, 1 pre-existing failure in training_config)
+- Test count increased from 64 to 76 passing tests (12 new tests added)
+- Suggestions: Next tasks are MechInt-1l9 (integration test for mini training loop) or MechInt-5b2 (property tests)
