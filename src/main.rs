@@ -120,6 +120,42 @@ fn main() {
     let result = training.run(learner);
     let model = result.model;
 
+    // Save labeled checkpoints at key epochs for grokking analysis
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("💾 Saving Key Checkpoints");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    // Epoch 100 (~step 1,000): End of memorization phase
+    if num_epochs >= 100 {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, 100, "memorization_e100") {
+            eprintln!("⚠️  Warning: Could not save memorization checkpoint (epoch 100): {}", e);
+        } else {
+            println!("💾 Saved memorization checkpoint at epoch 100 (~step 1,000)");
+        }
+    }
+
+    // Epoch 500 (~step 5,000): Deep in plateau phase
+    if num_epochs >= 500 {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, 500, "plateau_e500") {
+            eprintln!("⚠️  Warning: Could not save plateau checkpoint (epoch 500): {}", e);
+        } else {
+            println!("💾 Saved plateau checkpoint at epoch 500 (~step 5,000)");
+        }
+    }
+
+    // Epoch 1500 (~step 15,000): Post-grok solidification
+    if num_epochs >= 1500 {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, 1500, "postgrok_e1500") {
+            eprintln!("⚠️  Warning: Could not save post-grok checkpoint (epoch 1500): {}", e);
+        } else {
+            println!("💾 Saved post-grok checkpoint at epoch 1500 (~step 15,000)");
+        }
+    }
+
+    println!();
+
     let (loss_history, accuracy_history) =
         load_metric_history(artifact_dir, num_epochs, steps_per_epoch);
 
