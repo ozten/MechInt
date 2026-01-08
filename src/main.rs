@@ -31,7 +31,6 @@ type MyAutodiffBackend = Autodiff<WgpuBackend>;
 fn main() {
     // Parse command-line arguments
     let args: Vec<String> = std::env::args().collect();
-    #[allow(unused_variables)] // Will be used in MechInt-u89 for video frame generation
     let video_mode = args.contains(&"--video".to_string());
 
     if video_mode {
@@ -898,6 +897,19 @@ fn main() {
 
     println!();
 
+    // Generate video frames if --video flag was set
+    if video_mode {
+        println!();
+        println!("📹 Video Frame Generation:");
+        println!();
+        generate_video_frames(
+            artifact_dir,
+            &device,
+            grokking_epoch,
+            num_epochs,
+        );
+    }
+
     println!();
     println!("{}", "=".repeat(80));
     println!("🎉 All analysis complete!");
@@ -1277,6 +1289,170 @@ fn export_activation_surfaces(
             );
         }
     }
+}
+
+/// Generate video frames showing embedding evolution throughout training
+///
+/// Creates a sequence of 7x7 embedding grid visualizations at regular intervals,
+/// suitable for creating an animation of the grokking phenomenon.
+fn generate_video_frames(
+    artifact_dir: &str,
+    device: &WgpuDevice,
+    grokking_epoch: Option<usize>,
+    num_epochs: usize,
+) {
+    println!("   Generating video frames for embedding evolution...");
+
+    let video_dir = Path::new(artifact_dir).join("video_frames");
+    if let Err(e) = fs::create_dir_all(&video_dir) {
+        eprintln!("   ⚠️  Could not create video_frames directory: {}", e);
+        return;
+    }
+
+    // Define frame schedule: dense early, sparse later
+    // This captures the rapid changes during memorization and grokking
+    let mut frame_epochs = vec![1, 10, 25, 50, 75, 100]; // Early phase (0-100)
+
+    // Memorization phase (100-500)
+    for e in (150..=500).step_by(50) {
+        if e <= num_epochs {
+            frame_epochs.push(e);
+        }
+    }
+
+    // Plateau and grokking phase (500-1000)
+    for e in (550..=1000).step_by(50) {
+        if e <= num_epochs {
+            frame_epochs.push(e);
+        }
+    }
+
+    // Post-grokking phase (1000+)
+    for e in (1100..=num_epochs).step_by(100) {
+        frame_epochs.push(e);
+    }
+
+    // Always include the final epoch
+    if !frame_epochs.contains(&num_epochs) {
+        frame_epochs.push(num_epochs);
+    }
+
+    println!("   📹 Will generate {} frames", frame_epochs.len());
+
+    let mut successful_frames = 0;
+
+    for (frame_idx, epoch) in frame_epochs.iter().enumerate() {
+        // Try labeled checkpoint first (for special epochs)
+        let labeled_checkpoints = vec![
+            (1, "initial"),
+            (100, "memorization_e100"),
+            (500, "plateau_e500"),
+            (1500, "postgrok_e1500"),
+            (num_epochs, "final"),
+        ];
+
+        let grok_epoch = grokking_epoch.unwrap_or(0);
+        let mut labeled_path = None;
+
+        // Check if this epoch matches a labeled checkpoint
+        for (label_epoch, label) in labeled_checkpoints {
+            if *epoch == label_epoch {
+                let path = Path::new(artifact_dir)
+                    .join("checkpoint_labeled")
+                    .join(format!("model-{}.mpk", label));
+                if path.exists() {
+                    labeled_path = Some(path);
+                    break;
+                }
+            }
+        }
+
+        // Check for grokking checkpoint
+        if grokking_epoch.is_some() && *epoch == grok_epoch {
+            let path = Path::new(artifact_dir)
+                .join("checkpoint_labeled")
+                .join("model-grokking.mpk");
+            if path.exists() {
+                labeled_path = Some(path);
+            }
+        }
+
+        // Fall back to epoch-based checkpoint
+        let checkpoint_path = labeled_path.unwrap_or_else(|| {
+            Path::new(artifact_dir)
+                .join("checkpoint")
+                .join(format!("model-{}.mpk", epoch))
+        });
+
+        if !checkpoint_path.exists() {
+            // Skip missing checkpoints (expected for many epochs)
+            continue;
+        }
+
+        // Load checkpoint and extract embeddings
+        match checkpoint::load_checkpoint::<MyAutodiffBackend>(
+            checkpoint_path.to_str().unwrap(),
+            device,
+        ) {
+            Ok(model) => {
+                let embeddings = analysis::extract_all_embeddings(&model);
+
+                if embeddings.is_empty() || embeddings[0].is_empty() {
+                    eprintln!("   ⚠️  Skipping epoch {}: no embeddings found", epoch);
+                    continue;
+                }
+
+                // Select 7 interesting dimensions (high variance)
+                let interesting_dims = plotting::select_interesting_dimensions(&embeddings, 7);
+
+                if interesting_dims.len() < 7 {
+                    eprintln!("   ⚠️  Skipping epoch {}: insufficient dimensions (need 7, got {})",
+                             epoch, interesting_dims.len());
+                    continue;
+                }
+
+                let dims: [usize; 7] = [
+                    interesting_dims[0],
+                    interesting_dims[1],
+                    interesting_dims[2],
+                    interesting_dims[3],
+                    interesting_dims[4],
+                    interesting_dims[5],
+                    interesting_dims[6],
+                ];
+
+                // Generate 7x7 embedding grid with zero-padded frame number
+                let output_path = format!(
+                    "{}/frame_{:04}_epoch_{:05}.png",
+                    video_dir.display(),
+                    frame_idx,
+                    epoch
+                );
+
+                let title = format!("Embedding Evolution - Epoch {}", epoch);
+
+                match plotting::plot_embedding_grid_fast(&embeddings, &dims, &output_path, &title) {
+                    Ok(_) => {
+                        successful_frames += 1;
+                        if successful_frames % 10 == 0 {
+                            println!("   ✅ Generated {} frames...", successful_frames);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("   ⚠️  Could not generate frame for epoch {}: {}", epoch, e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("   ⚠️  Could not load checkpoint for epoch {}: {}", epoch, e);
+            }
+        }
+    }
+
+    println!("   ✅ Generated {} video frames in {}",
+             successful_frames, video_dir.display());
+    println!("   💡 Create video with: ffmpeg -framerate 10 -pattern_type glob -i '{}/frame_*.png' -c:v libx264 -pix_fmt yuv420p grokking_evolution.mp4",
+             video_dir.display());
 }
 
 #[cfg(test)]
