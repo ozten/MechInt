@@ -2,6 +2,10 @@
 
 This project reproduces the grokking modular addition experiment in Rust using the Burn framework.
 
+![](accuracy.png)
+
+![](loss.png)
+
 ## Run Training (TUI)
 
 The training loop uses Burn's `SupervisedTraining` with the default renderer. The renderer is a TUI
