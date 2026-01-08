@@ -315,3 +315,13 @@
 - Infrastructure complete and ready for empirical validation once training completes
 - Suggestions: Run full training to generate checkpoints, then use verification script to confirm DFT algorithm learned
 
+## [2026-01-08 08:15:00] Completed MechInt-u8p
+- Added 6 comprehensive batch_size=1 edge case tests to prevent future squeeze/reshape bugs
+- Model tests: test_forward_with_token_weights_batch_size_one, test_forward_with_mlp_activations_batch_size_one
+- Analysis tests: test_compute_restricted_loss_batch_size_one, test_compute_excluded_loss_batch_size_one
+- Comprehensive batch size tests: test_compute_restricted_loss_various_batch_sizes, test_compute_excluded_loss_various_batch_sizes
+- All tests verify correct handling of batch_size=1 and various sizes (1,2,5,10,100) without panicking
+- Tests use actual model embedding weights for forward_with_token_weights validation
+- Test count increased from 58 to 64 passing tests (6 new tests added)
+- Suggestions: Next tasks are MechInt-efu (tests for compute_restricted_loss/compute_excluded_loss type safety) or MechInt-1l9 (integration test for mini training loop)
+
