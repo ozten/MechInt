@@ -221,3 +221,37 @@
   * Export module: JSON loading utilities
 - All 58 library tests pass, code compiles with zero warnings
 - Suggestions: Remaining task is MechInt-rj9 (weight decay sweep), but it's low priority and compute-intensive
+
+## [2026-01-08 00:56:00] Completed MechInt-rj9
+- Implemented comprehensive weight decay sweep infrastructure for grokking robustness validation
+- Added environment variable support to TrainingConfig for flexible parameter sweeps:
+  * GROK_WEIGHT_DECAY: Controls weight decay value (default: 1.0)
+  * GROK_SEED: Controls random seed (default: 42)
+  * GROK_NUM_EPOCHS: Controls training epochs (default: 3000)
+  * GROK_SKIP_VALIDATION: Bypasses strict parameter validation for sweeps
+- Created TrainingConfig::from_env() method to load config from environment
+- Updated main.rs to display actual weight decay and seed values from config
+- Created scripts/sweep_weight_decay.sh orchestration script:
+  * Runs 9 experiments (3 weight decay values × 3 seeds)
+  * Supports --dry-run and --quick modes for testing
+  * Captures outputs to structured run directories
+  * Extracts grokking detection results from logs
+  * Estimated compute: 90-135 GPU hours for full sweep
+- Created scripts/analyze_weight_decay_sweep.py analysis tool:
+  * Detects grokking epochs from accuracy history
+  * Groups results by weight decay and computes statistics
+  * Validates hypotheses: WD=0.5 delays, WD=1.0 baseline, WD=2.0 accelerates
+  * Exports analysis_summary.json with detailed metrics
+- Created scripts/plot_sweep_comparison.py visualization tool:
+  * Generates interactive Plotly HTML plots
+  * Validation accuracy overlay (log scale)
+  * Grokking epoch distribution box plots
+  * Combined multi-panel comparison view
+- Expanded scripts/README.md with comprehensive weight decay sweep documentation:
+  * Usage instructions and quick start guide
+  * Environment variable reference
+  * Experiment design and success criteria
+  * Output structure and troubleshooting
+- All 58 library tests pass, code compiles cleanly
+- Dry-run and quick modes tested successfully
+- Suggestions: Infrastructure complete and ready for execution when GPU compute is available. All core implementation tasks finished.
