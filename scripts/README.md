@@ -2,6 +2,7 @@
 
 This directory contains tools for visualizing and analyzing the grokking phenomenon in modular arithmetic learning, including:
 
+- **Fourier structure verification** - Verify DFT algorithm learned during grokking
 - **3D activation surface visualization** - Visualize MLP neuron activation patterns
 - **Weight decay sweep experiments** - Validate grokking robustness across different hyperparameters
 
@@ -21,7 +22,29 @@ pip install numpy plotly
 
 ## Usage
 
-### 1. Export Activation Data
+### 1. Fourier Structure Verification
+
+Run comprehensive verification of the Discrete Fourier Transform algorithm learned during grokking:
+
+```bash
+./scripts/verify_fourier_structure.sh
+```
+
+This script:
+- Checks for required checkpoint files
+- Validates embedding visualizations exist
+- Parses FFT analysis results
+- Runs comprehensive test suite (58 tests)
+- Provides detailed verification status for:
+  - Embedding clock geometry (circular Fourier structure)
+  - FFT dominant frequencies (modulus p=113 alignment)
+  - MLP rectified sine waves
+  - Pairwise manifold rings (Lissajous curves)
+  - 3D diagonal interference ridges
+
+See [docs/FOURIER_VERIFICATION.md](../docs/FOURIER_VERIFICATION.md) for detailed methodology and metrics.
+
+### 2. Export Activation Data
 
 The training pipeline automatically exports activation surface data during post-training analysis. These JSON files are saved to the artifacts directory:
 
@@ -34,7 +57,7 @@ artifacts/activation_surface_neuron_204.json
 
 Each JSON file contains a 113x113 grid of activation values for all possible (x, y) input pairs.
 
-### 2. Generate 3D Visualizations
+### 3. Generate 3D Visualizations
 
 Run the visualization script on any exported JSON file:
 
@@ -48,7 +71,7 @@ This generates two HTML files:
 
 Open the HTML files in your browser to interact with the 3D plots (rotate, zoom, pan).
 
-### 3. Custom Output Path
+### 4. Custom Output Path
 
 Specify a custom output path:
 
