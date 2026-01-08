@@ -141,12 +141,58 @@ fn main() {
         }
     }
 
-    let grokking_epoch = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0);
-    if let Some(epoch) = grokking_epoch {
-        if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
+    // Detect grokking transition with advanced analysis
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("🔍 Detecting Grokking Phase Transition");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    let grokking_detection = detect_grokking_transition(artifact_dir, num_epochs, steps_per_epoch);
+    let grokking_epoch = if let Some((epoch, step, info)) = &grokking_detection {
+        println!("🎯 GROKKING DETECTED!");
+        println!("   Transition occurred at:");
+        println!("     - Epoch: {}", epoch);
+        println!("     - Step: {}", step);
+        println!("   Validation accuracy metrics:");
+        println!("     - Plateau baseline: {:.2}%", info.baseline_val_acc);
+        println!("     - Post-grok accuracy: {:.2}%", info.grok_val_acc);
+        println!("     - Accuracy jump: {:.2}% (within {} steps)",
+                 info.accuracy_jump, info.window_size);
+        println!();
+        println!("   This sudden jump from ~random ({:.1}%) to ~perfect ({:.1}%)",
+                 info.baseline_val_acc, info.grok_val_acc);
+        println!("   is the hallmark of the grokking phenomenon!");
+        println!();
+
+        if let Err(e) = copy_checkpoint_set(artifact_dir, *epoch, "grokking") {
             eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
+        } else {
+            println!("💾 Saved grokking checkpoint at epoch {} (step {})", epoch, step);
         }
-    }
+
+        Some(*epoch)
+    } else {
+        println!("⚠️  No clear grokking transition detected.");
+        println!("   Possible reasons:");
+        println!("     - Training hasn't run long enough (expected ~step 7,000)");
+        println!("     - Gradual improvement instead of sudden spike");
+        println!("     - Grokking may occur beyond current epoch count");
+        println!();
+        println!("   Falling back to simple threshold detection...");
+
+        let fallback = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0);
+        if let Some(epoch) = fallback {
+            println!("   Found validation accuracy >90% at epoch {}", epoch);
+            if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
+                eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
+            }
+        } else {
+            println!("   No epoch reached 90% validation accuracy yet.");
+        }
+
+        fallback
+    };
 
     if let Err(e) = copy_checkpoint_set(artifact_dir, num_epochs, "final") {
         eprintln!("⚠️  Warning: Could not save final checkpoint: {}", e);
@@ -718,6 +764,73 @@ fn read_metric_entries(
         .collect()
 }
 
+/// Detect grokking phase transition with rolling window analysis
+/// Returns (epoch, step, detection_info) when grokking is detected
+fn detect_grokking_transition(
+    artifact_dir: &str,
+    num_epochs: usize,
+    steps_per_epoch: usize,
+) -> Option<(usize, usize, GrokkingDetectionInfo)> {
+    const WINDOW_SIZE: usize = 500; // steps to look back for spike detection
+    const MIN_ACCURACY_JUMP: f64 = 20.0; // minimum % jump to qualify as grokking
+    const MIN_PLATEAU_STEP: usize = 1000; // must be past memorization phase
+    const TARGET_VAL_ACC: f64 = 90.0; // target validation accuracy
+
+    let mut val_acc_history: Vec<(usize, f64)> = Vec::new();
+
+    for epoch in 1..=num_epochs {
+        let values = read_metric_entries(artifact_dir, "valid", epoch, "Accuracy");
+        for (idx, value) in values.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            val_acc_history.push((step, value));
+
+            // Only start checking after plateau phase
+            if step < MIN_PLATEAU_STEP {
+                continue;
+            }
+
+            // Check if we've hit target accuracy
+            if value >= TARGET_VAL_ACC {
+                // Look back to find baseline (average over window before this jump)
+                let window_start = val_acc_history.len().saturating_sub(WINDOW_SIZE);
+                let baseline_values: Vec<f64> = val_acc_history[window_start..val_acc_history.len().saturating_sub(50)]
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .collect();
+
+                if baseline_values.is_empty() {
+                    continue;
+                }
+
+                let baseline_acc = baseline_values.iter().sum::<f64>() / baseline_values.len() as f64;
+                let accuracy_jump = value - baseline_acc;
+
+                // Verify this is a true spike (not gradual improvement)
+                if accuracy_jump >= MIN_ACCURACY_JUMP {
+                    let info = GrokkingDetectionInfo {
+                        baseline_val_acc: baseline_acc,
+                        grok_val_acc: value,
+                        accuracy_jump,
+                        window_size: WINDOW_SIZE,
+                    };
+                    return Some((epoch, step, info));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Information about detected grokking transition
+#[derive(Debug, Clone)]
+struct GrokkingDetectionInfo {
+    baseline_val_acc: f64,
+    grok_val_acc: f64,
+    accuracy_jump: f64,
+    window_size: usize,
+}
+
 fn find_grokking_epoch(
     artifact_dir: &str,
     num_epochs: usize,
@@ -757,4 +870,142 @@ fn copy_checkpoint_set(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    /// Helper to create synthetic accuracy data for testing
+    fn create_test_accuracy_data(
+        dir: &Path,
+        epochs: Vec<(usize, Vec<f64>)>,
+    ) -> std::io::Result<()> {
+        for (epoch, values) in epochs {
+            let epoch_dir = dir.join("valid").join(format!("epoch-{}", epoch));
+            fs::create_dir_all(&epoch_dir)?;
+
+            let accuracy_file = epoch_dir.join("Accuracy.log");
+            let mut file = fs::File::create(accuracy_file)?;
+
+            for value in values {
+                // Write in NumericEntry format: "value,count"
+                writeln!(file, "{},100", value)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_detect_grokking_transition_finds_spike() {
+        let temp_dir = TempDir::new().unwrap();
+        let artifact_dir = temp_dir.path();
+
+        // Simulate grokking:
+        // - Epochs 1-150: plateau at ~1% (random guessing)
+        // - Epoch 151: sudden jump to 95% (grokking at step ~1510)
+        let steps_per_epoch = 10;
+
+        let mut epochs = vec![];
+
+        // Plateau phase (epochs 1-150) - exceeds MIN_PLATEAU_STEP=1000
+        for epoch in 1..=150 {
+            epochs.push((epoch, vec![1.0, 1.2, 0.9, 1.1, 1.0, 0.8, 1.3, 1.1, 0.9, 1.0]));
+        }
+
+        // Grokking epoch (151): sudden spike at step ~1510
+        epochs.push((151, vec![2.0, 5.0, 15.0, 35.0, 60.0, 80.0, 92.0, 95.0, 96.0, 97.0]));
+
+        // Post-grok (epochs 152-155)
+        for epoch in 152..=155 {
+            epochs.push((epoch, vec![96.5, 97.0, 97.5, 98.0, 97.8, 98.2, 98.0, 97.9, 98.1, 98.0]));
+        }
+
+        create_test_accuracy_data(artifact_dir, epochs).unwrap();
+
+        // Run detection
+        let result = detect_grokking_transition(
+            artifact_dir.to_str().unwrap(),
+            155,
+            steps_per_epoch,
+        );
+
+        // Debug: print what we got
+        if let Some((epoch, step, ref info)) = result {
+            eprintln!("Detected: epoch={}, step={}, baseline={:.2}, grok={:.2}, jump={:.2}",
+                     epoch, step, info.baseline_val_acc, info.grok_val_acc, info.accuracy_jump);
+        } else {
+            eprintln!("No grokking detected!");
+        }
+
+        assert!(result.is_some(), "Should detect grokking transition");
+        let (epoch, step, info) = result.unwrap();
+
+        assert_eq!(epoch, 151, "Should detect grokking at epoch 151");
+        assert!(step >= 1500 && step <= 1510, "Step should be around 1500-1510, got {}", step);
+        assert!(info.baseline_val_acc < 5.0, "Baseline should be near random (~1%), got {:.2}", info.baseline_val_acc);
+        assert!(info.grok_val_acc >= 90.0, "Post-grok accuracy should be >90%, got {:.2}", info.grok_val_acc);
+        assert!(info.accuracy_jump >= 20.0, "Accuracy jump should be >20%, got {:.2}", info.accuracy_jump);
+    }
+
+    #[test]
+    fn test_detect_grokking_transition_no_spike() {
+        let temp_dir = TempDir::new().unwrap();
+        let artifact_dir = temp_dir.path();
+
+        // Simulate gradual improvement (no grokking)
+        let steps_per_epoch = 10;
+        let mut epochs = vec![];
+
+        for epoch in 1..=100 {
+            let base_acc = epoch as f64 * 0.8; // gradual linear improvement
+            epochs.push((epoch, vec![base_acc; 10]));
+        }
+
+        create_test_accuracy_data(artifact_dir, epochs).unwrap();
+
+        // Run detection
+        let result = detect_grokking_transition(
+            artifact_dir.to_str().unwrap(),
+            100,
+            steps_per_epoch,
+        );
+
+        assert!(result.is_none(), "Should NOT detect grokking with gradual improvement");
+    }
+
+    #[test]
+    fn test_detect_grokking_transition_early_spike_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        let artifact_dir = temp_dir.path();
+
+        // Simulate early spike (before MIN_PLATEAU_STEP=1000)
+        let steps_per_epoch = 10;
+        let mut epochs = vec![];
+
+        // Early spike at epoch 10 (step ~100) - should be ignored
+        for epoch in 1..=10 {
+            epochs.push((epoch, vec![1.0; 10]));
+        }
+        epochs.push((11, vec![95.0; 10])); // spike at step ~110
+
+        for epoch in 12..=50 {
+            epochs.push((epoch, vec![96.0; 10]));
+        }
+
+        create_test_accuracy_data(artifact_dir, epochs).unwrap();
+
+        // Run detection
+        let result = detect_grokking_transition(
+            artifact_dir.to_str().unwrap(),
+            50,
+            steps_per_epoch,
+        );
+
+        // Should not detect because spike is before MIN_PLATEAU_STEP (1000)
+        assert!(result.is_none(), "Should ignore spike before step 1000");
+    }
 }
