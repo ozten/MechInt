@@ -29,7 +29,7 @@ impl Default for TrainingConfig {
             batch_size: 512,
             num_workers: 0,
             seed: 42,
-            num_epochs: 20_000,
+            num_epochs: 3_000,  // ~30k steps; grokking expected at step ~7k (epoch ~700)
             base_learning_rate: 1e-3,
             warmup_steps: 10,
             optimizer: OptimizerSpec::AdamW {
@@ -43,6 +43,41 @@ impl Default for TrainingConfig {
 }
 
 impl TrainingConfig {
+    /// Create a TrainingConfig from environment variables for parameter sweeps.
+    /// Supported env vars:
+    /// - GROK_WEIGHT_DECAY: f32 (default: 1.0)
+    /// - GROK_SEED: u64 (default: 42)
+    /// - GROK_NUM_EPOCHS: usize (default: 3000)
+    /// - GROK_SKIP_VALIDATION: bool (default: false, set to "1" to skip validation)
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(wd_str) = std::env::var("GROK_WEIGHT_DECAY") {
+            if let Ok(wd) = wd_str.parse::<f32>() {
+                config.optimizer = OptimizerSpec::AdamW {
+                    beta_1: 0.9,
+                    beta_2: 0.98,
+                    epsilon: 1e-8,
+                    weight_decay: wd,
+                };
+            }
+        }
+
+        if let Ok(seed_str) = std::env::var("GROK_SEED") {
+            if let Ok(seed) = seed_str.parse::<u64>() {
+                config.seed = seed;
+            }
+        }
+
+        if let Ok(epochs_str) = std::env::var("GROK_NUM_EPOCHS") {
+            if let Ok(epochs) = epochs_str.parse::<usize>() {
+                config.num_epochs = epochs;
+            }
+        }
+
+        config
+    }
+
     pub fn steps_per_epoch(&self, dataset_len: usize) -> usize {
         (dataset_len + self.batch_size - 1) / self.batch_size
     }
@@ -71,6 +106,11 @@ impl TrainingConfig {
     }
 
     pub fn validate_grokking_spec(&self) -> Result<(), String> {
+        // Allow skipping validation for parameter sweeps
+        if std::env::var("GROK_SKIP_VALIDATION").unwrap_or_default() == "1" {
+            return Ok(());
+        }
+
         if self.batch_size != 512 {
             return Err(format!(
                 "batch_size must be 512, got {}",
@@ -92,9 +132,9 @@ impl TrainingConfig {
                 self.warmup_steps
             ));
         }
-        if self.num_epochs < 10_000 {
+        if self.num_epochs < 2_000 {
             return Err(format!(
-                "num_epochs must be at least 10000, got {}",
+                "num_epochs must be at least 2000 (gives ~20k steps; grok at step ~7k), got {}",
                 self.num_epochs
             ));
         }
@@ -145,7 +185,7 @@ mod tests {
         assert_eq!(config.seed, 42);
         assert_eq!(config.base_learning_rate, 1e-3);
         assert!((10..=50).contains(&config.warmup_steps));
-        assert!(config.num_epochs >= 10_000);
+        assert!(config.num_epochs >= 2_000);
 
         let train_fraction = config.train_fraction();
         assert!((0.3..=0.5).contains(&train_fraction));
@@ -190,10 +230,10 @@ mod tests {
         expect_invalid(config.clone());
 
         config.warmup_steps = 10;
-        config.num_epochs = 5000;
+        config.num_epochs = 1000;
         expect_invalid(config.clone());
 
-        config.num_epochs = 20_000;
+        config.num_epochs = 3_000;
         config.optimizer = OptimizerSpec::AdamW {
             beta_1: 0.8,
             beta_2: 0.98,

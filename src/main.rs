@@ -3,6 +3,7 @@
 mod analysis;
 mod checkpoint;
 mod data;
+mod export;
 mod model;
 mod plotting;
 mod training;
@@ -28,21 +29,27 @@ type WgpuBackend = Wgpu;
 type MyAutodiffBackend = Autodiff<WgpuBackend>;
 
 fn main() {
-    let training_config = TrainingConfig::default();
+    // Load config from environment variables (for parameter sweeps) or use defaults
+    let training_config = TrainingConfig::from_env();
     training_config
         .validate_grokking_spec()
         .expect("Training config must match grokking spec");
 
+    let weight_decay = match training_config.optimizer {
+        training_config::OptimizerSpec::AdamW { weight_decay, .. } => weight_decay,
+    };
+
     println!("🚀 Grokking experiment starting...");
     println!("Configuration:");
     println!("  - Model: 1-layer transformer (4 heads, dim=128, MLP=512)");
-    println!("  - Optimizer: AdamW (β1=0.9, β2=0.98, weight decay=1.0)");
+    println!("  - Optimizer: AdamW (β1=0.9, β2=0.98, weight decay={})", weight_decay);
     println!(
         "  - Learning rate: {} with {}-step linear warmup",
         training_config.base_learning_rate, training_config.warmup_steps
     );
     println!("  - Batch size: {}", training_config.batch_size);
     println!("  - Training epochs: {}", training_config.num_epochs);
+    println!("  - Seed: {}", training_config.seed);
     println!(
         "  - Target: Modular addition (a + b) mod {}",
         ModularAdditionDataset::modulus()
@@ -71,7 +78,7 @@ fn main() {
     // Setup optimizer to match paper (AdamW with high weight decay, β2=0.98)
     let optim_config = training_config.optimizer_config();
     let optim = optim_config.init();
-    println!("✅ AdamW optimizer initialized (β1=0.9, β2=0.98, weight decay=1.0)");
+    println!("✅ AdamW optimizer initialized (β1=0.9, β2=0.98, weight decay={})", weight_decay);
     println!();
 
     // Training configuration (matching paper)
@@ -120,6 +127,42 @@ fn main() {
     let result = training.run(learner);
     let model = result.model;
 
+    // Save labeled checkpoints at key epochs for grokking analysis
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("💾 Saving Key Checkpoints");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    // Epoch 100 (~step 1,000): End of memorization phase
+    if num_epochs >= 100 {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, 100, "memorization_e100") {
+            eprintln!("⚠️  Warning: Could not save memorization checkpoint (epoch 100): {}", e);
+        } else {
+            println!("💾 Saved memorization checkpoint at epoch 100 (~step 1,000)");
+        }
+    }
+
+    // Epoch 500 (~step 5,000): Deep in plateau phase
+    if num_epochs >= 500 {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, 500, "plateau_e500") {
+            eprintln!("⚠️  Warning: Could not save plateau checkpoint (epoch 500): {}", e);
+        } else {
+            println!("💾 Saved plateau checkpoint at epoch 500 (~step 5,000)");
+        }
+    }
+
+    // Epoch 1500 (~step 15,000): Post-grok solidification
+    if num_epochs >= 1500 {
+        if let Err(e) = copy_checkpoint_set(artifact_dir, 1500, "postgrok_e1500") {
+            eprintln!("⚠️  Warning: Could not save post-grok checkpoint (epoch 1500): {}", e);
+        } else {
+            println!("💾 Saved post-grok checkpoint at epoch 1500 (~step 15,000)");
+        }
+    }
+
+    println!();
+
     let (loss_history, accuracy_history) =
         load_metric_history(artifact_dir, num_epochs, steps_per_epoch);
 
@@ -141,12 +184,58 @@ fn main() {
         }
     }
 
-    let grokking_epoch = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0);
-    if let Some(epoch) = grokking_epoch {
-        if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
+    // Detect grokking transition with advanced analysis
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("🔍 Detecting Grokking Phase Transition");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    let grokking_detection = detect_grokking_transition(artifact_dir, num_epochs, steps_per_epoch);
+    let grokking_epoch = if let Some((epoch, step, info)) = &grokking_detection {
+        println!("🎯 GROKKING DETECTED!");
+        println!("   Transition occurred at:");
+        println!("     - Epoch: {}", epoch);
+        println!("     - Step: {}", step);
+        println!("   Validation accuracy metrics:");
+        println!("     - Plateau baseline: {:.2}%", info.baseline_val_acc);
+        println!("     - Post-grok accuracy: {:.2}%", info.grok_val_acc);
+        println!("     - Accuracy jump: {:.2}% (within {} steps)",
+                 info.accuracy_jump, info.window_size);
+        println!();
+        println!("   This sudden jump from ~random ({:.1}%) to ~perfect ({:.1}%)",
+                 info.baseline_val_acc, info.grok_val_acc);
+        println!("   is the hallmark of the grokking phenomenon!");
+        println!();
+
+        if let Err(e) = copy_checkpoint_set(artifact_dir, *epoch, "grokking") {
             eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
+        } else {
+            println!("💾 Saved grokking checkpoint at epoch {} (step {})", epoch, step);
         }
-    }
+
+        Some(*epoch)
+    } else {
+        println!("⚠️  No clear grokking transition detected.");
+        println!("   Possible reasons:");
+        println!("     - Training hasn't run long enough (expected ~step 7,000)");
+        println!("     - Gradual improvement instead of sudden spike");
+        println!("     - Grokking may occur beyond current epoch count");
+        println!();
+        println!("   Falling back to simple threshold detection...");
+
+        let fallback = find_grokking_epoch(artifact_dir, num_epochs, steps_per_epoch, 90.0);
+        if let Some(epoch) = fallback {
+            println!("   Found validation accuracy >90% at epoch {}", epoch);
+            if let Err(e) = copy_checkpoint_set(artifact_dir, epoch, "grokking") {
+                eprintln!("⚠️  Warning: Could not save grokking checkpoint: {}", e);
+            }
+        } else {
+            println!("   No epoch reached 90% validation accuracy yet.");
+        }
+
+        fallback
+    };
 
     if let Err(e) = copy_checkpoint_set(artifact_dir, num_epochs, "final") {
         eprintln!("⚠️  Warning: Could not save final checkpoint: {}", e);
@@ -214,46 +303,158 @@ fn main() {
         eprintln!("⚠️  Warning: Could not save accuracy history: {}", e);
     }
 
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("🔬 Advanced Metrics (Restricted/Excluded Loss)");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    let restricted_top_k = 5usize;
     let excluded_top_k = 5usize;
-    let excluded_batch_size = training_config.batch_size;
+    let metrics_batch_size = training_config.batch_size;
+    let mut restricted_history = analysis::RestrictedLossHistory::new();
     let mut excluded_history = analysis::ExcludedLossHistory::new();
 
+    // Key checkpoints based on expected timeline:
+    // - Epoch 100 (~step 1,000): End of memorization
+    // - Epoch 500 (~step 5,000): Deep in plateau
+    // - Grokking epoch (~step 7,000): Phase transition
+    // - Final epoch: Post-grok solidification
+    let checkpoint_epochs = vec![100, 500];
+
+    println!("🔍 Computing restricted/excluded loss at key checkpoints...");
+    println!("   (These metrics detect internal restructuring before grokking)");
+    println!();
+
+    // Initial model (step 0)
     let initial_model: Transformer<MyAutodiffBackend> = TransformerConfig::default().init(&device);
+    match analysis::compute_restricted_loss(
+        &initial_model,
+        &train_dataset,
+        &device,
+        restricted_top_k,
+        metrics_batch_size,
+    ) {
+        Ok(loss) => {
+            restricted_history.add_snapshot(0, loss);
+            println!("   Step 0 - Restricted loss (top_k={}): {:.4}", restricted_top_k, loss);
+        }
+        Err(err) => {
+            eprintln!("⚠️  Warning: Could not compute restricted loss (initial): {}", err);
+        }
+    }
+
     match analysis::compute_excluded_loss(
         &initial_model,
         &train_dataset,
         &device,
         excluded_top_k,
-        excluded_batch_size,
+        metrics_batch_size,
     ) {
         Ok(loss) => {
             excluded_history.add_snapshot(0, loss);
-            println!("🔎 Excluded loss (initial, top_k={}): {:.4}", excluded_top_k, loss);
+            println!("   Step 0 - Excluded loss (top_k={}): {:.4}", excluded_top_k, loss);
         }
         Err(err) => {
             eprintln!("⚠️  Warning: Could not compute excluded loss (initial): {}", err);
         }
     }
 
+    // Checkpoint epochs (100, 500)
+    for &epoch in &checkpoint_epochs {
+        if epoch > num_epochs {
+            continue;
+        }
+
+        let checkpoint_step = (epoch - 1) * steps_per_epoch;
+        let checkpoint_path = format!("{artifact_dir}/checkpoint/model-{epoch}.mpk");
+
+        if !Path::new(&checkpoint_path).exists() {
+            continue;
+        }
+
+        match checkpoint::load_checkpoint::<MyAutodiffBackend>(&checkpoint_path, &device) {
+            Ok(checkpoint_model) => {
+                match analysis::compute_restricted_loss(
+                    &checkpoint_model,
+                    &train_dataset,
+                    &device,
+                    restricted_top_k,
+                    metrics_batch_size,
+                ) {
+                    Ok(loss) => {
+                        restricted_history.add_snapshot(checkpoint_step, loss);
+                        println!("   Step {} (epoch {}) - Restricted loss: {:.4}",
+                                 checkpoint_step, epoch, loss);
+                    }
+                    Err(err) => {
+                        eprintln!("⚠️  Warning: Could not compute restricted loss (epoch {}): {}",
+                                  epoch, err);
+                    }
+                }
+
+                match analysis::compute_excluded_loss(
+                    &checkpoint_model,
+                    &train_dataset,
+                    &device,
+                    excluded_top_k,
+                    metrics_batch_size,
+                ) {
+                    Ok(loss) => {
+                        excluded_history.add_snapshot(checkpoint_step, loss);
+                        println!("   Step {} (epoch {}) - Excluded loss: {:.4}",
+                                 checkpoint_step, epoch, loss);
+                    }
+                    Err(err) => {
+                        eprintln!("⚠️  Warning: Could not compute excluded loss (epoch {}): {}",
+                                  epoch, err);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("⚠️  Warning: Could not load checkpoint at epoch {}: {}", epoch, err);
+            }
+        }
+    }
+
+    // Grokking checkpoint (if detected)
     if let Some(epoch) = grokking_epoch {
         let grokking_step = (epoch - 1) * steps_per_epoch;
         let grokking_path = format!("{artifact_dir}/checkpoint_labeled/model-grokking.mpk");
         if Path::new(&grokking_path).exists() {
             match checkpoint::load_checkpoint::<MyAutodiffBackend>(&grokking_path, &device) {
                 Ok(grokking_model) => {
+                    match analysis::compute_restricted_loss(
+                        &grokking_model,
+                        &train_dataset,
+                        &device,
+                        restricted_top_k,
+                        metrics_batch_size,
+                    ) {
+                        Ok(loss) => {
+                            restricted_history.add_snapshot(grokking_step, loss);
+                            println!("   Step {} (GROK) - Restricted loss: {:.4}",
+                                     grokking_step, loss);
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "⚠️  Warning: Could not compute restricted loss (grokking): {}",
+                                err
+                            );
+                        }
+                    }
+
                     match analysis::compute_excluded_loss(
                         &grokking_model,
                         &train_dataset,
                         &device,
                         excluded_top_k,
-                        excluded_batch_size,
+                        metrics_batch_size,
                     ) {
                         Ok(loss) => {
                             excluded_history.add_snapshot(grokking_step, loss);
-                            println!(
-                                "🔎 Excluded loss (grokking, step {}, top_k={}): {:.4}",
-                                grokking_step, excluded_top_k, loss
-                            );
+                            println!("   Step {} (GROK) - Excluded loss: {:.4}",
+                                     grokking_step, loss);
                         }
                         Err(err) => {
                             eprintln!(
@@ -265,7 +466,7 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!(
-                        "⚠️  Warning: Could not load grokking checkpoint for excluded loss: {}",
+                        "⚠️  Warning: Could not load grokking checkpoint: {}",
                         err
                     );
                 }
@@ -278,31 +479,78 @@ fn main() {
         }
     }
 
+    // Final model
+    match analysis::compute_restricted_loss(
+        &model,
+        &train_dataset,
+        &device,
+        restricted_top_k,
+        metrics_batch_size,
+    ) {
+        Ok(loss) => {
+            restricted_history.add_snapshot(total_steps, loss);
+            println!("   Step {} (FINAL) - Restricted loss: {:.4}", total_steps, loss);
+        }
+        Err(err) => {
+            eprintln!("⚠️  Warning: Could not compute restricted loss (final): {}", err);
+        }
+    }
+
     match analysis::compute_excluded_loss(
         &model,
         &train_dataset,
         &device,
         excluded_top_k,
-        excluded_batch_size,
+        metrics_batch_size,
     ) {
         Ok(loss) => {
             excluded_history.add_snapshot(total_steps, loss);
-            println!(
-                "🔎 Excluded loss (final, step {}, top_k={}): {:.4}",
-                total_steps, excluded_top_k, loss
-            );
+            println!("   Step {} (FINAL) - Excluded loss: {:.4}", total_steps, loss);
         }
         Err(err) => {
             eprintln!("⚠️  Warning: Could not compute excluded loss (final): {}", err);
         }
     }
 
+    // Save restricted loss history
+    if !restricted_history.snapshots.is_empty() {
+        let restricted_history_path = format!("{artifact_dir}/restricted_loss_history.json");
+        if let Err(e) = restricted_history.save(&restricted_history_path) {
+            eprintln!("⚠️  Warning: Could not save restricted loss history: {}", e);
+        } else {
+            println!("💾 Saved restricted loss history to {}", restricted_history_path);
+        }
+
+        // Verify restricted loss drop (should drop BEFORE val accuracy improves)
+        if restricted_history.snapshots.len() >= 3 {
+            let drop_config = verify::RestrictedLossDropConfig {
+                min_relative_decrease: 0.3,
+            };
+            match verify::verify_restricted_loss_drop(&restricted_history.snapshots, &drop_config) {
+                Ok(report) => {
+                    println!(
+                        "✅ Restricted loss drop detected at step {} (baseline {:.4}, dropped to {:.4})",
+                        report.drop_step, report.baseline_loss, report.drop_loss
+                    );
+                    println!("   ⚡ This internal restructuring preceded the grokking transition!");
+                }
+                Err(err) => {
+                    eprintln!("ℹ️  Restricted loss drop: {}", err);
+                }
+            }
+        }
+    }
+
+    // Save excluded loss history
     if !excluded_history.snapshots.is_empty() {
         let excluded_history_path = format!("{artifact_dir}/excluded_loss_history.json");
         if let Err(e) = excluded_history.save(&excluded_history_path) {
             eprintln!("⚠️  Warning: Could not save excluded loss history: {}", e);
+        } else {
+            println!("💾 Saved excluded loss history to {}", excluded_history_path);
         }
 
+        // Verify excluded loss spike (should spike as grokking approaches)
         if excluded_history.snapshots.len() >= 3 {
             let spike_config = verify::ExcludedLossSpikeConfig {
                 min_relative_increase: 0.5,
@@ -313,17 +561,123 @@ fn main() {
                         "✅ Excluded loss spike detected at step {} (baseline {:.4}, peak {:.4})",
                         report.spike_step, report.baseline_loss, report.spike_loss
                     );
+                    println!("   ⚡ This spike indicates the model switching from memorization to Fourier algorithm!");
                 }
                 Err(err) => {
-                    eprintln!("⚠️  Warning: Excluded loss spike verification failed: {}", err);
+                    eprintln!("ℹ️  Excluded loss spike: {}", err);
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("🔬 Weight Norm Evolution (Weight Decay Mechanism)");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    let mut weight_norm_history = analysis::WeightNormHistory::new();
+
+    println!("🔍 Computing weight norms at key checkpoints...");
+    println!("   (Weight decay drives the transition from high-norm memorization to low-norm generalization)");
+    println!();
+
+    // Initial model (step 0)
+    let initial_norm = analysis::compute_model_weight_norm(&initial_model);
+    weight_norm_history.add_snapshot(0, initial_norm);
+    println!("   Step 0 - Weight norm: {:.4}", initial_norm);
+
+    // Checkpoint epochs (100, 500)
+    for &epoch in &checkpoint_epochs {
+        if epoch > num_epochs {
+            continue;
+        }
+
+        let checkpoint_step = (epoch - 1) * steps_per_epoch;
+        let checkpoint_path = format!("{artifact_dir}/checkpoint/model-{epoch}.mpk");
+
+        if !Path::new(&checkpoint_path).exists() {
+            continue;
+        }
+
+        match checkpoint::load_checkpoint::<MyAutodiffBackend>(&checkpoint_path, &device) {
+            Ok(checkpoint_model) => {
+                let norm = analysis::compute_model_weight_norm(&checkpoint_model);
+                weight_norm_history.add_snapshot(checkpoint_step, norm);
+                println!("   Step {} (epoch {}) - Weight norm: {:.4}", checkpoint_step, epoch, norm);
+            }
+            Err(err) => {
+                eprintln!("⚠️  Warning: Could not load checkpoint at epoch {}: {}", epoch, err);
+            }
+        }
+    }
+
+    // Grokking checkpoint (if detected)
+    if let Some(epoch) = grokking_epoch {
+        let grokking_step = (epoch - 1) * steps_per_epoch;
+        let grokking_path = format!("{artifact_dir}/checkpoint_labeled/model-grokking.mpk");
+        if Path::new(&grokking_path).exists() {
+            match checkpoint::load_checkpoint::<MyAutodiffBackend>(&grokking_path, &device) {
+                Ok(grokking_model) => {
+                    let norm = analysis::compute_model_weight_norm(&grokking_model);
+                    weight_norm_history.add_snapshot(grokking_step, norm);
+                    println!("   Step {} (GROK) - Weight norm: {:.4}", grokking_step, norm);
+                }
+                Err(err) => {
+                    eprintln!("⚠️  Warning: Could not load grokking checkpoint: {}", err);
                 }
             }
         } else {
-            eprintln!(
-                "⚠️  Warning: Excluded loss spike verification skipped (need >=3 points)"
-            );
+            eprintln!("⚠️  Warning: Grokking checkpoint not found at {}", grokking_path);
         }
     }
+
+    // Final model
+    let final_norm = analysis::compute_model_weight_norm(&model);
+    weight_norm_history.add_snapshot(total_steps, final_norm);
+    println!("   Step {} (FINAL) - Weight norm: {:.4}", total_steps, final_norm);
+
+    // Save weight norm history
+    if !weight_norm_history.snapshots.is_empty() {
+        let weight_norm_history_path = format!("{artifact_dir}/weight_norm_history.json");
+        if let Err(e) = weight_norm_history.save(&weight_norm_history_path) {
+            eprintln!("⚠️  Warning: Could not save weight norm history: {}", e);
+        } else {
+            println!("💾 Saved weight norm history to {}", weight_norm_history_path);
+        }
+
+        // Verify weight norm decay (should decrease during plateau phase)
+        if weight_norm_history.snapshots.len() >= 3 {
+            let decay_config = verify::WeightNormDecayConfig::default_for_grokking();
+
+            // Convert Vec<WeightNormSnapshot> to Vec<(usize, f64)>
+            let norm_tuples: Vec<(usize, f64)> = weight_norm_history
+                .snapshots
+                .iter()
+                .map(|s| (s.step, s.total_norm))
+                .collect();
+
+            // Get grokking step if available
+            let grok_step = grokking_epoch.map(|e| (e - 1) * steps_per_epoch);
+
+            match verify::verify_weight_norm_decay(&norm_tuples, grok_step, &decay_config) {
+                Ok(report) => {
+                    println!(
+                        "✅ Weight norm decay verified: {:.4} → {:.4} ({:.1}% decrease)",
+                        report.initial_norm,
+                        report.final_norm,
+                        (report.initial_norm - report.final_norm) / report.initial_norm * 100.0
+                    );
+                    println!("   ⚡ Weight decay successfully drove the transition to generalizing circuit!");
+                }
+                Err(err) => {
+                    eprintln!("ℹ️  Weight norm decay verification: {}", err);
+                }
+            }
+        }
+    }
+
+    println!();
 
     let pre_checkpoint = Path::new(artifact_dir).join("checkpoint").join("model-1.mpk");
     let post_checkpoint_grokking = Path::new(artifact_dir)
@@ -400,15 +754,22 @@ fn main() {
     // Generate plots
     println!();
     println!("{}", "=".repeat(80));
-    println!("📊 Generating Plots");
+    println!("📊 Generating Visualizations");
     println!("{}", "=".repeat(80));
+    println!();
+
+    // Create visualization directory
+    let viz_dir = "artifacts/visualizations";
+    std::fs::create_dir_all(viz_dir).ok();
+
+    println!("📈 Core Grokking Plots:");
     println!();
 
     // Plot 1: Loss evolution (train and val)
     if let Err(e) = plotting::plot_loss_history_dual(
         &loss_history.train_snapshots,
         &loss_history.val_snapshots,
-        "plots/loss_evolution.png",
+        &format!("{}/loss_evolution.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate loss plot: {}", e);
     }
@@ -417,7 +778,7 @@ fn main() {
     if let Err(e) = plotting::plot_accuracy_history(
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/accuracy_evolution.png",
+        &format!("{}/accuracy_evolution.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate accuracy plot: {}", e);
     }
@@ -428,16 +789,20 @@ fn main() {
         &loss_history.val_snapshots,
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/grokking_combined.png",
+        &format!("{}/grokking_combined.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate combined plot: {}", e);
     }
+
+    println!();
+    println!("📊 Log-Scale Snake Curve Plots:");
+    println!();
 
     // Plot 3b: Loss evolution with LOG SCALE (for paper Figure 1)
     if let Err(e) = plotting::plot_loss_history_dual_logscale(
         &loss_history.train_snapshots,
         &loss_history.val_snapshots,
-        "plots/loss_evolution_logscale.png",
+        &format!("{}/loss_evolution_logscale.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate log-scale loss plot: {}", e);
     }
@@ -446,7 +811,7 @@ fn main() {
     if let Err(e) = plotting::plot_accuracy_history_logscale(
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/accuracy_evolution_logscale.png",
+        &format!("{}/accuracy_evolution_logscale.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate log-scale accuracy plot: {}", e);
     }
@@ -457,10 +822,14 @@ fn main() {
         &loss_history.val_snapshots,
         &accuracy_history.train_snapshots,
         &accuracy_history.val_snapshots,
-        "plots/grokking_combined_logscale.png",
+        &format!("{}/grokking_combined_logscale.png", viz_dir),
     ) {
         eprintln!("⚠️  Warning: Could not generate log-scale combined plot: {}", e);
     }
+
+    println!();
+    println!("🔬 FFT Analysis Plots:");
+    println!();
 
     // Plot 4: FFT frequency distribution
     let fft_freq_data: Vec<(usize, usize, f64)> = fft_analysis
@@ -470,7 +839,7 @@ fn main() {
         .collect();
 
     if let Err(e) =
-        plotting::plot_fft_frequency_distribution(&fft_freq_data, "plots/fft_frequencies.png")
+        plotting::plot_fft_frequency_distribution(&fft_freq_data, &format!("{}/fft_frequencies.png", viz_dir))
     {
         eprintln!("⚠️  Warning: Could not generate FFT frequency plot: {}", e);
     }
@@ -487,9 +856,38 @@ fn main() {
         })
         .collect();
 
-    if let Err(e) = plotting::plot_fft_spectra(&token_spectra, "plots/fft_spectra.png") {
+    if let Err(e) = plotting::plot_fft_spectra(&token_spectra, &format!("{}/fft_spectra.png", viz_dir)) {
         eprintln!("⚠️  Warning: Could not generate FFT spectra plot: {}", e);
     }
+
+    println!();
+    println!("🎨 Embedding Visualizations:");
+    println!();
+
+    // Generate embedding grid visualizations for key checkpoints
+    generate_checkpoint_embeddings_visualization(
+        artifact_dir,
+        &device,
+        grokking_epoch,
+        num_epochs,
+        viz_dir,
+    );
+
+    println!();
+
+    println!();
+    println!("📊 3D Activation Surface Data Export:");
+    println!();
+
+    // Export activation surfaces for Python visualization
+    export_activation_surfaces(
+        artifact_dir,
+        &device,
+        grokking_epoch,
+        num_epochs,
+    );
+
+    println!();
 
     println!();
     println!("{}", "=".repeat(80));
@@ -560,6 +958,73 @@ fn read_metric_entries(
         .collect()
 }
 
+/// Detect grokking phase transition with rolling window analysis
+/// Returns (epoch, step, detection_info) when grokking is detected
+fn detect_grokking_transition(
+    artifact_dir: &str,
+    num_epochs: usize,
+    steps_per_epoch: usize,
+) -> Option<(usize, usize, GrokkingDetectionInfo)> {
+    const WINDOW_SIZE: usize = 500; // steps to look back for spike detection
+    const MIN_ACCURACY_JUMP: f64 = 20.0; // minimum % jump to qualify as grokking
+    const MIN_PLATEAU_STEP: usize = 1000; // must be past memorization phase
+    const TARGET_VAL_ACC: f64 = 90.0; // target validation accuracy
+
+    let mut val_acc_history: Vec<(usize, f64)> = Vec::new();
+
+    for epoch in 1..=num_epochs {
+        let values = read_metric_entries(artifact_dir, "valid", epoch, "Accuracy");
+        for (idx, value) in values.into_iter().enumerate() {
+            let step = (epoch - 1) * steps_per_epoch + idx;
+            val_acc_history.push((step, value));
+
+            // Only start checking after plateau phase
+            if step < MIN_PLATEAU_STEP {
+                continue;
+            }
+
+            // Check if we've hit target accuracy
+            if value >= TARGET_VAL_ACC {
+                // Look back to find baseline (average over window before this jump)
+                let window_start = val_acc_history.len().saturating_sub(WINDOW_SIZE);
+                let baseline_values: Vec<f64> = val_acc_history[window_start..val_acc_history.len().saturating_sub(50)]
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .collect();
+
+                if baseline_values.is_empty() {
+                    continue;
+                }
+
+                let baseline_acc = baseline_values.iter().sum::<f64>() / baseline_values.len() as f64;
+                let accuracy_jump = value - baseline_acc;
+
+                // Verify this is a true spike (not gradual improvement)
+                if accuracy_jump >= MIN_ACCURACY_JUMP {
+                    let info = GrokkingDetectionInfo {
+                        baseline_val_acc: baseline_acc,
+                        grok_val_acc: value,
+                        accuracy_jump,
+                        window_size: WINDOW_SIZE,
+                    };
+                    return Some((epoch, step, info));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Information about detected grokking transition
+#[derive(Debug, Clone)]
+struct GrokkingDetectionInfo {
+    baseline_val_acc: f64,
+    grok_val_acc: f64,
+    accuracy_jump: f64,
+    window_size: usize,
+}
+
 fn find_grokking_epoch(
     artifact_dir: &str,
     num_epochs: usize,
@@ -599,4 +1064,346 @@ fn copy_checkpoint_set(
     }
 
     Ok(())
+}
+
+/// Generate embedding visualizations for key checkpoints
+fn generate_checkpoint_embeddings_visualization(
+    artifact_dir: &str,
+    device: &WgpuDevice,
+    grokking_epoch: Option<usize>,
+    num_epochs: usize,
+    viz_dir: &str,
+) {
+    println!("   Generating embedding visualizations for key checkpoints...");
+
+    // Define checkpoints to visualize
+    let mut checkpoints = vec![
+        (1, "initial"),
+        (100, "memorization_e100"),
+        (500, "plateau_e500"),
+    ];
+
+    // Add grokking checkpoint if detected
+    if let Some(epoch) = grokking_epoch {
+        checkpoints.push((epoch, "grokking"));
+    }
+
+    // Add final checkpoint
+    checkpoints.push((num_epochs, "final"));
+
+    for (epoch, label) in checkpoints {
+        // Try labeled checkpoint first (for initial/grokking/final)
+        let labeled_path = Path::new(artifact_dir)
+            .join("checkpoint_labeled")
+            .join(format!("model-{}.mpk", label));
+
+        let checkpoint_path = if labeled_path.exists() {
+            labeled_path
+        } else {
+            // Fall back to epoch-based checkpoint
+            Path::new(artifact_dir)
+                .join("checkpoint")
+                .join(format!("model-{}.mpk", epoch))
+        };
+
+        if !checkpoint_path.exists() {
+            println!("   ⚠️  Skipping {}: checkpoint not found", label);
+            continue;
+        }
+
+        match checkpoint::load_checkpoint::<MyAutodiffBackend>(
+            checkpoint_path.to_str().unwrap(),
+            device,
+        ) {
+            Ok(model) => {
+                // Extract embeddings
+                let embeddings = analysis::extract_all_embeddings(&model);
+
+                if embeddings.is_empty() || embeddings[0].is_empty() {
+                    println!("   ⚠️  Skipping {}: no embeddings found", label);
+                    continue;
+                }
+
+                // Select 3 interesting dimensions (high variance)
+                let interesting_dims = plotting::select_interesting_dimensions(&embeddings, 3);
+
+                if interesting_dims.len() < 3 {
+                    println!("   ⚠️  Skipping {}: insufficient dimensions", label);
+                    continue;
+                }
+
+                let dims: [usize; 3] = [
+                    interesting_dims[0],
+                    interesting_dims[1],
+                    interesting_dims[2],
+                ];
+
+                // Generate 3x3 embedding grid
+                let output_path = format!("{}/embeddings_3x3_{}.png", viz_dir, label);
+                let title = format!("Embedding Grid - {} (epoch {})", label, epoch);
+
+                match plotting::plot_embedding_grid_3x3(&embeddings, &dims, &output_path, &title) {
+                    Ok(_) => {
+                        println!("   ✅ Generated embedding grid for {}", label);
+                    }
+                    Err(e) => {
+                        eprintln!("   ⚠️  Could not generate embedding grid for {}: {}", label, e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("   ⚠️  Could not load checkpoint for {}: {}", label, e);
+            }
+        }
+    }
+}
+
+/// Export activation surface data for post-grokking checkpoint
+/// This data can be visualized using scripts/visualize_activation_surface.py
+fn export_activation_surfaces(
+    artifact_dir: &str,
+    device: &WgpuDevice,
+    grokking_epoch: Option<usize>,
+    num_epochs: usize,
+) {
+    use crate::export::ActivationSurface;
+
+    println!("   Exporting activation surfaces for 3D visualization...");
+
+    // We'll export surfaces from post-grokking checkpoint (or final if no grokking detected)
+    let checkpoint_label = if grokking_epoch.is_some() {
+        "postgrok_e1500"
+    } else {
+        "final"
+    };
+
+    let checkpoint_epoch = if let Some(_epoch) = grokking_epoch {
+        // Try to use post-grokking checkpoint at epoch 1500
+        if num_epochs >= 1500 {
+            1500
+        } else {
+            num_epochs
+        }
+    } else {
+        num_epochs
+    };
+
+    // Try labeled checkpoint first
+    let labeled_path = Path::new(artifact_dir)
+        .join("checkpoint_labeled")
+        .join(format!("model-{}.mpk", checkpoint_label));
+
+    let checkpoint_path = if labeled_path.exists() {
+        labeled_path
+    } else {
+        // Fall back to epoch-based checkpoint
+        Path::new(artifact_dir)
+            .join("checkpoint")
+            .join(format!("model-{}.mpk", checkpoint_epoch))
+    };
+
+    if !checkpoint_path.exists() {
+        println!("   ⚠️  No post-grokking checkpoint found, skipping activation surface export");
+        return;
+    }
+
+    match checkpoint::load_checkpoint::<MyAutodiffBackend>(
+        checkpoint_path.to_str().unwrap(),
+        device,
+    ) {
+        Ok(model) => {
+            let modulus = ModularAdditionDataset::modulus();
+
+            // Export surfaces for several neurons (indices 0, 10, 20, 30, ..., up to 5 neurons)
+            let d_ff = 512; // From config
+            let neuron_indices: Vec<usize> = (0..5).map(|i| i * (d_ff / 5).min(50)).collect();
+
+            for &neuron_index in &neuron_indices {
+                if neuron_index >= d_ff {
+                    continue;
+                }
+
+                match verify::collect_mlp_activation_surface(&model, device, neuron_index) {
+                    Ok(surface) => {
+                        let surface_data = ActivationSurface::new(neuron_index, modulus, surface);
+
+                        let output_path = format!(
+                            "{}/activation_surface_neuron_{}.json",
+                            artifact_dir, neuron_index
+                        );
+
+                        match surface_data.save_json(&output_path) {
+                            Ok(_) => {
+                                println!(
+                                    "   ✅ Exported activation surface for neuron {} to {}",
+                                    neuron_index, output_path
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "   ⚠️  Failed to save activation surface for neuron {}: {}",
+                                    neuron_index, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "   ⚠️  Failed to collect activation surface for neuron {}: {}",
+                            neuron_index, e
+                        );
+                    }
+                }
+            }
+
+            println!(
+                "   💡 Visualize surfaces with: python scripts/visualize_activation_surface.py {}/activation_surface_neuron_0.json",
+                artifact_dir
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "   ⚠️  Could not load checkpoint for activation surface export: {}",
+                e
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    /// Helper to create synthetic accuracy data for testing
+    fn create_test_accuracy_data(
+        dir: &Path,
+        epochs: Vec<(usize, Vec<f64>)>,
+    ) -> std::io::Result<()> {
+        for (epoch, values) in epochs {
+            let epoch_dir = dir.join("valid").join(format!("epoch-{}", epoch));
+            fs::create_dir_all(&epoch_dir)?;
+
+            let accuracy_file = epoch_dir.join("Accuracy.log");
+            let mut file = fs::File::create(accuracy_file)?;
+
+            for value in values {
+                // Write in NumericEntry format: "value,count"
+                writeln!(file, "{},100", value)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_detect_grokking_transition_finds_spike() {
+        let temp_dir = TempDir::new().unwrap();
+        let artifact_dir = temp_dir.path();
+
+        // Simulate grokking:
+        // - Epochs 1-150: plateau at ~1% (random guessing)
+        // - Epoch 151: sudden jump to 95% (grokking at step ~1510)
+        let steps_per_epoch = 10;
+
+        let mut epochs = vec![];
+
+        // Plateau phase (epochs 1-150) - exceeds MIN_PLATEAU_STEP=1000
+        for epoch in 1..=150 {
+            epochs.push((epoch, vec![1.0, 1.2, 0.9, 1.1, 1.0, 0.8, 1.3, 1.1, 0.9, 1.0]));
+        }
+
+        // Grokking epoch (151): sudden spike at step ~1510
+        epochs.push((151, vec![2.0, 5.0, 15.0, 35.0, 60.0, 80.0, 92.0, 95.0, 96.0, 97.0]));
+
+        // Post-grok (epochs 152-155)
+        for epoch in 152..=155 {
+            epochs.push((epoch, vec![96.5, 97.0, 97.5, 98.0, 97.8, 98.2, 98.0, 97.9, 98.1, 98.0]));
+        }
+
+        create_test_accuracy_data(artifact_dir, epochs).unwrap();
+
+        // Run detection
+        let result = detect_grokking_transition(
+            artifact_dir.to_str().unwrap(),
+            155,
+            steps_per_epoch,
+        );
+
+        // Debug: print what we got
+        if let Some((epoch, step, ref info)) = result {
+            eprintln!("Detected: epoch={}, step={}, baseline={:.2}, grok={:.2}, jump={:.2}",
+                     epoch, step, info.baseline_val_acc, info.grok_val_acc, info.accuracy_jump);
+        } else {
+            eprintln!("No grokking detected!");
+        }
+
+        assert!(result.is_some(), "Should detect grokking transition");
+        let (epoch, step, info) = result.unwrap();
+
+        assert_eq!(epoch, 151, "Should detect grokking at epoch 151");
+        assert!(step >= 1500 && step <= 1510, "Step should be around 1500-1510, got {}", step);
+        assert!(info.baseline_val_acc < 5.0, "Baseline should be near random (~1%), got {:.2}", info.baseline_val_acc);
+        assert!(info.grok_val_acc >= 90.0, "Post-grok accuracy should be >90%, got {:.2}", info.grok_val_acc);
+        assert!(info.accuracy_jump >= 20.0, "Accuracy jump should be >20%, got {:.2}", info.accuracy_jump);
+    }
+
+    #[test]
+    fn test_detect_grokking_transition_no_spike() {
+        let temp_dir = TempDir::new().unwrap();
+        let artifact_dir = temp_dir.path();
+
+        // Simulate gradual improvement (no grokking)
+        let steps_per_epoch = 10;
+        let mut epochs = vec![];
+
+        for epoch in 1..=100 {
+            let base_acc = epoch as f64 * 0.8; // gradual linear improvement
+            epochs.push((epoch, vec![base_acc; 10]));
+        }
+
+        create_test_accuracy_data(artifact_dir, epochs).unwrap();
+
+        // Run detection
+        let result = detect_grokking_transition(
+            artifact_dir.to_str().unwrap(),
+            100,
+            steps_per_epoch,
+        );
+
+        assert!(result.is_none(), "Should NOT detect grokking with gradual improvement");
+    }
+
+    #[test]
+    fn test_detect_grokking_transition_early_spike_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        let artifact_dir = temp_dir.path();
+
+        // Simulate early spike (before MIN_PLATEAU_STEP=1000)
+        let steps_per_epoch = 10;
+        let mut epochs = vec![];
+
+        // Early spike at epoch 10 (step ~100) - should be ignored
+        for epoch in 1..=10 {
+            epochs.push((epoch, vec![1.0; 10]));
+        }
+        epochs.push((11, vec![95.0; 10])); // spike at step ~110
+
+        for epoch in 12..=50 {
+            epochs.push((epoch, vec![96.0; 10]));
+        }
+
+        create_test_accuracy_data(artifact_dir, epochs).unwrap();
+
+        // Run detection
+        let result = detect_grokking_transition(
+            artifact_dir.to_str().unwrap(),
+            50,
+            steps_per_epoch,
+        );
+
+        // Should not detect because spike is before MIN_PLATEAU_STEP (1000)
+        assert!(result.is_none(), "Should ignore spike before step 1000");
+    }
 }

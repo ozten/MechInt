@@ -396,6 +396,31 @@ pub struct LossHistory {
     pub val_snapshots: Vec<(usize, f64)>,   // (step, loss)
 }
 
+/// Track restricted loss over time (only top-k frequencies kept)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RestrictedLossHistory {
+    pub snapshots: Vec<(usize, f64)>, // (step, loss)
+}
+
+impl RestrictedLossHistory {
+    pub fn new() -> Self {
+        Self {
+            snapshots: Vec::new(),
+        }
+    }
+
+    pub fn add_snapshot(&mut self, step: usize, loss: f64) {
+        self.snapshots.push((step, loss));
+    }
+
+    pub fn save(&self, filename: &str) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(filename, json)?;
+        println!("💾 Restricted loss history saved to: {}", filename);
+        Ok(())
+    }
+}
+
 /// Track excluded loss over time (top-k frequencies removed)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExcludedLossHistory {
@@ -429,6 +454,8 @@ impl LossHistory {
         }
     }
 
+    /// NOTE: Currently unused - loss tracked directly in main loop
+    #[allow(dead_code)]
     pub fn add_snapshot(&mut self, step: usize, train_loss: f64, val_loss: f64) {
         self.train_snapshots.push((step, train_loss));
         self.val_snapshots.push((step, val_loss));
@@ -514,6 +541,9 @@ pub fn extract_all_embeddings<B: Backend>(model: &Transformer<B>) -> Vec<Vec<f64
 
 /// Verify that FFT analysis of embeddings shows dominant frequencies
 /// that align with the modulus structure and nontrivial spectral patterns
+///
+/// NOTE: Reserved for manual verification or future integration into analysis pipeline
+#[allow(dead_code)]
 pub fn verify_fft_dominant_frequencies<B: Backend>(
     model: &Transformer<B>,
     config: &FFTDominantFrequencyConfig,
@@ -523,6 +553,9 @@ pub fn verify_fft_dominant_frequencies<B: Backend>(
 }
 
 /// Verify FFT dominant frequencies from pre-extracted embeddings
+///
+/// NOTE: Reserved for manual verification or future integration into analysis pipeline
+#[allow(dead_code)]
 pub fn verify_fft_dominant_frequencies_from_embeddings(
     embeddings: &[Vec<f64>],
     config: &FFTDominantFrequencyConfig,
@@ -642,6 +675,8 @@ pub struct FFTDominantFrequencyConfig {
 }
 
 impl FFTDominantFrequencyConfig {
+    /// NOTE: Reserved for future integration into analysis pipeline
+    #[allow(dead_code)]
     pub fn default_for_modulus(modulus: usize) -> Self {
         Self {
             modulus,
@@ -653,6 +688,7 @@ impl FFTDominantFrequencyConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FFTDominantFrequencyReport {
     pub modulus_frequency_fraction: f64,
     pub spectrum_entropy: f64,
@@ -661,6 +697,7 @@ pub struct FFTDominantFrequencyReport {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EmbeddingClockConfig {
     pub max_radius_std_fraction: f64,
     pub min_angular_coverage: f64,
@@ -669,6 +706,8 @@ pub struct EmbeddingClockConfig {
 }
 
 impl EmbeddingClockConfig {
+    /// NOTE: Reserved for future integration into analysis pipeline
+    #[allow(dead_code)]
     pub fn default_for_modulus(_modulus: usize) -> Self {
         Self {
             max_radius_std_fraction: 0.1,
@@ -680,6 +719,7 @@ impl EmbeddingClockConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EmbeddingClockReport {
     pub mean_radius: f64,
     pub radius_std: f64,
@@ -688,6 +728,8 @@ pub struct EmbeddingClockReport {
     pub order_fraction: f64,
 }
 
+/// NOTE: Reserved for future integration into analysis pipeline
+#[allow(dead_code)]
 pub fn project_embeddings_to_fourier_plane(
     embeddings: &[Vec<f64>],
     modulus: usize,
@@ -735,6 +777,8 @@ pub fn project_embeddings_to_fourier_plane(
     Ok(coords)
 }
 
+/// NOTE: Reserved for future integration into analysis pipeline
+#[allow(dead_code)]
 pub fn verify_embedding_clock_geometry(
     embeddings: &[Vec<f64>],
     modulus: usize,
@@ -826,6 +870,8 @@ pub fn verify_embedding_clock_geometry(
     })
 }
 
+// Helper functions for embedding clock geometry verification
+#[allow(dead_code)]
 fn normalize_vector(vec: &[f64]) -> Result<Vec<f64>, String> {
     let norm = vec.iter().map(|v| v * v).sum::<f64>().sqrt();
     if norm == 0.0 {
@@ -834,10 +880,12 @@ fn normalize_vector(vec: &[f64]) -> Result<Vec<f64>, String> {
     Ok(vec.iter().map(|v| v / norm).collect())
 }
 
+#[allow(dead_code)]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+#[allow(dead_code)]
 fn wrap_angle(angle: f64) -> f64 {
     let tau = std::f64::consts::PI * 2.0;
     let mut wrapped = angle % tau;
@@ -847,6 +895,7 @@ fn wrap_angle(angle: f64) -> f64 {
     wrapped
 }
 
+#[allow(dead_code)]
 fn wrap_angle_signed(angle: f64) -> f64 {
     let tau = std::f64::consts::PI * 2.0;
     let mut wrapped = (angle + std::f64::consts::PI) % tau;
@@ -856,6 +905,7 @@ fn wrap_angle_signed(angle: f64) -> f64 {
     wrapped - std::f64::consts::PI
 }
 
+#[allow(dead_code)]
 fn angular_coverage(angles: &[f64]) -> f64 {
     if angles.is_empty() {
         return 0.0;
@@ -879,6 +929,7 @@ fn angular_coverage(angles: &[f64]) -> f64 {
     (tau - max_gap) / tau
 }
 
+#[allow(dead_code)]
 fn order_fraction(angles: &[f64], modulus: usize) -> f64 {
     if angles.len() < 2 || modulus == 0 {
         return 0.0;
@@ -918,6 +969,8 @@ impl AccuracyHistory {
         }
     }
 
+    /// NOTE: Currently unused - accuracy tracked directly in main loop
+    #[allow(dead_code)]
     pub fn add_snapshot(&mut self, step: usize, train_acc: f32, val_acc: f32) {
         self.train_snapshots.push((step, train_acc));
         self.val_snapshots.push((step, val_acc));

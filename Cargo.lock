@@ -2539,6 +2539,7 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

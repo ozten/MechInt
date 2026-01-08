@@ -8,6 +8,8 @@ use std::path::Path;
 use crate::model::Transformer;
 
 /// Save model checkpoint to disk
+/// NOTE: Superseded by copy_checkpoint_set - kept for reference
+#[allow(dead_code)]
 pub fn save_checkpoint<B: AutodiffBackend>(
     model: &Transformer<B>,
     path: &str,
@@ -53,6 +55,8 @@ pub fn load_checkpoint<B: AutodiffBackend>(
 }
 
 /// Save a labeled checkpoint (e.g., "grokking", "final", "step_1000")
+/// NOTE: Superseded by copy_checkpoint_set - kept for reference
+#[allow(dead_code)]
 pub fn save_labeled_checkpoint<B: AutodiffBackend>(
     model: &Transformer<B>,
     label: &str,
@@ -62,6 +66,8 @@ pub fn save_labeled_checkpoint<B: AutodiffBackend>(
 }
 
 /// List available checkpoints
+/// NOTE: Utility function reserved for future use
+#[allow(dead_code)]
 pub fn list_checkpoints() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let checkpoint_dir = Path::new("checkpoints");
 
