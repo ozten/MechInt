@@ -6,7 +6,7 @@
 
 ## Task Selection
 Pick ONE task from the ready queue. Prefer:
-- `verify-1` label
+- `video-1` label
 - Higher priority (lower number = higher priority)
 - Tasks with fewer blockers
 - Tasks that build on recently completed work noted in PROGRESS.txt
