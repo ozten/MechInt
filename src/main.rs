@@ -214,46 +214,158 @@ fn main() {
         eprintln!("⚠️  Warning: Could not save accuracy history: {}", e);
     }
 
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("🔬 Advanced Metrics (Restricted/Excluded Loss)");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    let restricted_top_k = 5usize;
     let excluded_top_k = 5usize;
-    let excluded_batch_size = training_config.batch_size;
+    let metrics_batch_size = training_config.batch_size;
+    let mut restricted_history = analysis::RestrictedLossHistory::new();
     let mut excluded_history = analysis::ExcludedLossHistory::new();
 
+    // Key checkpoints based on expected timeline:
+    // - Epoch 100 (~step 1,000): End of memorization
+    // - Epoch 500 (~step 5,000): Deep in plateau
+    // - Grokking epoch (~step 7,000): Phase transition
+    // - Final epoch: Post-grok solidification
+    let checkpoint_epochs = vec![100, 500];
+
+    println!("🔍 Computing restricted/excluded loss at key checkpoints...");
+    println!("   (These metrics detect internal restructuring before grokking)");
+    println!();
+
+    // Initial model (step 0)
     let initial_model: Transformer<MyAutodiffBackend> = TransformerConfig::default().init(&device);
+    match analysis::compute_restricted_loss(
+        &initial_model,
+        &train_dataset,
+        &device,
+        restricted_top_k,
+        metrics_batch_size,
+    ) {
+        Ok(loss) => {
+            restricted_history.add_snapshot(0, loss);
+            println!("   Step 0 - Restricted loss (top_k={}): {:.4}", restricted_top_k, loss);
+        }
+        Err(err) => {
+            eprintln!("⚠️  Warning: Could not compute restricted loss (initial): {}", err);
+        }
+    }
+
     match analysis::compute_excluded_loss(
         &initial_model,
         &train_dataset,
         &device,
         excluded_top_k,
-        excluded_batch_size,
+        metrics_batch_size,
     ) {
         Ok(loss) => {
             excluded_history.add_snapshot(0, loss);
-            println!("🔎 Excluded loss (initial, top_k={}): {:.4}", excluded_top_k, loss);
+            println!("   Step 0 - Excluded loss (top_k={}): {:.4}", excluded_top_k, loss);
         }
         Err(err) => {
             eprintln!("⚠️  Warning: Could not compute excluded loss (initial): {}", err);
         }
     }
 
+    // Checkpoint epochs (100, 500)
+    for &epoch in &checkpoint_epochs {
+        if epoch > num_epochs {
+            continue;
+        }
+
+        let checkpoint_step = (epoch - 1) * steps_per_epoch;
+        let checkpoint_path = format!("{artifact_dir}/checkpoint/model-{epoch}.mpk");
+
+        if !Path::new(&checkpoint_path).exists() {
+            continue;
+        }
+
+        match checkpoint::load_checkpoint::<MyAutodiffBackend>(&checkpoint_path, &device) {
+            Ok(checkpoint_model) => {
+                match analysis::compute_restricted_loss(
+                    &checkpoint_model,
+                    &train_dataset,
+                    &device,
+                    restricted_top_k,
+                    metrics_batch_size,
+                ) {
+                    Ok(loss) => {
+                        restricted_history.add_snapshot(checkpoint_step, loss);
+                        println!("   Step {} (epoch {}) - Restricted loss: {:.4}",
+                                 checkpoint_step, epoch, loss);
+                    }
+                    Err(err) => {
+                        eprintln!("⚠️  Warning: Could not compute restricted loss (epoch {}): {}",
+                                  epoch, err);
+                    }
+                }
+
+                match analysis::compute_excluded_loss(
+                    &checkpoint_model,
+                    &train_dataset,
+                    &device,
+                    excluded_top_k,
+                    metrics_batch_size,
+                ) {
+                    Ok(loss) => {
+                        excluded_history.add_snapshot(checkpoint_step, loss);
+                        println!("   Step {} (epoch {}) - Excluded loss: {:.4}",
+                                 checkpoint_step, epoch, loss);
+                    }
+                    Err(err) => {
+                        eprintln!("⚠️  Warning: Could not compute excluded loss (epoch {}): {}",
+                                  epoch, err);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("⚠️  Warning: Could not load checkpoint at epoch {}: {}", epoch, err);
+            }
+        }
+    }
+
+    // Grokking checkpoint (if detected)
     if let Some(epoch) = grokking_epoch {
         let grokking_step = (epoch - 1) * steps_per_epoch;
         let grokking_path = format!("{artifact_dir}/checkpoint_labeled/model-grokking.mpk");
         if Path::new(&grokking_path).exists() {
             match checkpoint::load_checkpoint::<MyAutodiffBackend>(&grokking_path, &device) {
                 Ok(grokking_model) => {
+                    match analysis::compute_restricted_loss(
+                        &grokking_model,
+                        &train_dataset,
+                        &device,
+                        restricted_top_k,
+                        metrics_batch_size,
+                    ) {
+                        Ok(loss) => {
+                            restricted_history.add_snapshot(grokking_step, loss);
+                            println!("   Step {} (GROK) - Restricted loss: {:.4}",
+                                     grokking_step, loss);
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "⚠️  Warning: Could not compute restricted loss (grokking): {}",
+                                err
+                            );
+                        }
+                    }
+
                     match analysis::compute_excluded_loss(
                         &grokking_model,
                         &train_dataset,
                         &device,
                         excluded_top_k,
-                        excluded_batch_size,
+                        metrics_batch_size,
                     ) {
                         Ok(loss) => {
                             excluded_history.add_snapshot(grokking_step, loss);
-                            println!(
-                                "🔎 Excluded loss (grokking, step {}, top_k={}): {:.4}",
-                                grokking_step, excluded_top_k, loss
-                            );
+                            println!("   Step {} (GROK) - Excluded loss: {:.4}",
+                                     grokking_step, loss);
                         }
                         Err(err) => {
                             eprintln!(
@@ -265,7 +377,7 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!(
-                        "⚠️  Warning: Could not load grokking checkpoint for excluded loss: {}",
+                        "⚠️  Warning: Could not load grokking checkpoint: {}",
                         err
                     );
                 }
@@ -278,31 +390,78 @@ fn main() {
         }
     }
 
+    // Final model
+    match analysis::compute_restricted_loss(
+        &model,
+        &train_dataset,
+        &device,
+        restricted_top_k,
+        metrics_batch_size,
+    ) {
+        Ok(loss) => {
+            restricted_history.add_snapshot(total_steps, loss);
+            println!("   Step {} (FINAL) - Restricted loss: {:.4}", total_steps, loss);
+        }
+        Err(err) => {
+            eprintln!("⚠️  Warning: Could not compute restricted loss (final): {}", err);
+        }
+    }
+
     match analysis::compute_excluded_loss(
         &model,
         &train_dataset,
         &device,
         excluded_top_k,
-        excluded_batch_size,
+        metrics_batch_size,
     ) {
         Ok(loss) => {
             excluded_history.add_snapshot(total_steps, loss);
-            println!(
-                "🔎 Excluded loss (final, step {}, top_k={}): {:.4}",
-                total_steps, excluded_top_k, loss
-            );
+            println!("   Step {} (FINAL) - Excluded loss: {:.4}", total_steps, loss);
         }
         Err(err) => {
             eprintln!("⚠️  Warning: Could not compute excluded loss (final): {}", err);
         }
     }
 
+    // Save restricted loss history
+    if !restricted_history.snapshots.is_empty() {
+        let restricted_history_path = format!("{artifact_dir}/restricted_loss_history.json");
+        if let Err(e) = restricted_history.save(&restricted_history_path) {
+            eprintln!("⚠️  Warning: Could not save restricted loss history: {}", e);
+        } else {
+            println!("💾 Saved restricted loss history to {}", restricted_history_path);
+        }
+
+        // Verify restricted loss drop (should drop BEFORE val accuracy improves)
+        if restricted_history.snapshots.len() >= 3 {
+            let drop_config = verify::RestrictedLossDropConfig {
+                min_relative_decrease: 0.3,
+            };
+            match verify::verify_restricted_loss_drop(&restricted_history.snapshots, &drop_config) {
+                Ok(report) => {
+                    println!(
+                        "✅ Restricted loss drop detected at step {} (baseline {:.4}, dropped to {:.4})",
+                        report.drop_step, report.baseline_loss, report.drop_loss
+                    );
+                    println!("   ⚡ This internal restructuring preceded the grokking transition!");
+                }
+                Err(err) => {
+                    eprintln!("ℹ️  Restricted loss drop: {}", err);
+                }
+            }
+        }
+    }
+
+    // Save excluded loss history
     if !excluded_history.snapshots.is_empty() {
         let excluded_history_path = format!("{artifact_dir}/excluded_loss_history.json");
         if let Err(e) = excluded_history.save(&excluded_history_path) {
             eprintln!("⚠️  Warning: Could not save excluded loss history: {}", e);
+        } else {
+            println!("💾 Saved excluded loss history to {}", excluded_history_path);
         }
 
+        // Verify excluded loss spike (should spike as grokking approaches)
         if excluded_history.snapshots.len() >= 3 {
             let spike_config = verify::ExcludedLossSpikeConfig {
                 min_relative_increase: 0.5,
@@ -313,17 +472,16 @@ fn main() {
                         "✅ Excluded loss spike detected at step {} (baseline {:.4}, peak {:.4})",
                         report.spike_step, report.baseline_loss, report.spike_loss
                     );
+                    println!("   ⚡ This spike indicates the model switching from memorization to Fourier algorithm!");
                 }
                 Err(err) => {
-                    eprintln!("⚠️  Warning: Excluded loss spike verification failed: {}", err);
+                    eprintln!("ℹ️  Excluded loss spike: {}", err);
                 }
             }
-        } else {
-            eprintln!(
-                "⚠️  Warning: Excluded loss spike verification skipped (need >=3 points)"
-            );
         }
     }
+
+    println!();
 
     let pre_checkpoint = Path::new(artifact_dir).join("checkpoint").join("model-1.mpk");
     let post_checkpoint_grokking = Path::new(artifact_dir)

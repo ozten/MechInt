@@ -62,6 +62,18 @@ pub struct RestrictedLossReport {
 }
 
 #[derive(Debug, Clone)]
+pub struct RestrictedLossDropConfig {
+    pub min_relative_decrease: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestrictedLossDropReport {
+    pub drop_step: usize,
+    pub drop_loss: f64,
+    pub baseline_loss: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExcludedLossSpikeConfig {
     pub min_relative_increase: f64,
 }
@@ -413,6 +425,46 @@ pub fn verify_restricted_loss_early_drop(
     Ok(RestrictedLossReport {
         restricted_drop_step,
         full_drop_step,
+    })
+}
+
+pub fn verify_restricted_loss_drop(
+    restricted_losses: &[(usize, f64)],
+    config: &RestrictedLossDropConfig,
+) -> Result<RestrictedLossDropReport, String> {
+    if restricted_losses.len() < 3 {
+        return Err("restricted loss history requires at least 3 points".to_string());
+    }
+
+    let first = restricted_losses.first().ok_or_else(|| {
+        "restricted loss history is empty".to_string()
+    })?;
+    let baseline_loss = first.1;
+
+    let (min_idx, (min_step, min_loss)) = restricted_losses
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .ok_or_else(|| "restricted loss history is empty".to_string())?;
+
+    if min_idx == 0 {
+        return Err("restricted loss minimum occurs at start (no drop detected)".to_string());
+    }
+
+    let relative_decrease = (baseline_loss - min_loss) / baseline_loss;
+    if relative_decrease < config.min_relative_decrease {
+        return Err(format!(
+            "restricted loss decrease too small (baseline {:.4}, min {:.4}, decrease {:.1}%)",
+            baseline_loss, min_loss, relative_decrease * 100.0
+        ));
+    }
+
+    Ok(RestrictedLossDropReport {
+        drop_step: *min_step,
+        drop_loss: *min_loss,
+        baseline_loss,
     })
 }
 
@@ -1584,6 +1636,44 @@ mod tests {
         let err = verify_excluded_loss_spike(&excluded_loss, &config)
             .expect_err("expected excluded loss spike verification to fail");
         assert!(err.contains("excluded loss spike too small"));
+    }
+
+    #[test]
+    fn restricted_loss_drop_verification_passes() {
+        let restricted_loss = vec![
+            (0, 2.0),
+            (1000, 1.8),
+            (5000, 1.2),
+            (7000, 0.8),
+            (10000, 0.9),
+        ];
+        let config = RestrictedLossDropConfig {
+            min_relative_decrease: 0.3,
+        };
+
+        let report = verify_restricted_loss_drop(&restricted_loss, &config)
+            .expect("expected restricted loss drop verification to pass");
+        assert_eq!(report.drop_step, 7000);
+        assert!(report.baseline_loss > report.drop_loss);
+        assert!((report.baseline_loss - report.drop_loss) / report.baseline_loss >= 0.3);
+    }
+
+    #[test]
+    fn restricted_loss_drop_verification_fails_without_drop() {
+        let restricted_loss = vec![
+            (0, 2.0),
+            (1000, 2.1),
+            (5000, 1.9),
+            (7000, 2.0),
+            (10000, 2.05),
+        ];
+        let config = RestrictedLossDropConfig {
+            min_relative_decrease: 0.3,
+        };
+
+        let err = verify_restricted_loss_drop(&restricted_loss, &config)
+            .expect_err("expected restricted loss drop verification to fail");
+        assert!(err.contains("restricted loss decrease too small"));
     }
 
     #[test]

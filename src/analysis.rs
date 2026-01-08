@@ -396,6 +396,31 @@ pub struct LossHistory {
     pub val_snapshots: Vec<(usize, f64)>,   // (step, loss)
 }
 
+/// Track restricted loss over time (only top-k frequencies kept)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RestrictedLossHistory {
+    pub snapshots: Vec<(usize, f64)>, // (step, loss)
+}
+
+impl RestrictedLossHistory {
+    pub fn new() -> Self {
+        Self {
+            snapshots: Vec::new(),
+        }
+    }
+
+    pub fn add_snapshot(&mut self, step: usize, loss: f64) {
+        self.snapshots.push((step, loss));
+    }
+
+    pub fn save(&self, filename: &str) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(filename, json)?;
+        println!("💾 Restricted loss history saved to: {}", filename);
+        Ok(())
+    }
+}
+
 /// Track excluded loss over time (top-k frequencies removed)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExcludedLossHistory {
