@@ -40,6 +40,7 @@ impl GrokkingVerificationConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GrokkingPhaseReport {
     pub early_train_step: usize,
     pub transition_step: usize,
@@ -56,6 +57,7 @@ pub struct RestrictedLossVerificationConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RestrictedLossReport {
     pub restricted_drop_step: usize,
     pub full_drop_step: usize,
@@ -95,6 +97,7 @@ pub struct MlpWaveVerificationConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MlpWaveNeuronReport {
     pub neuron_index: usize,
     pub dominant_frequency: usize,
@@ -104,6 +107,7 @@ pub struct MlpWaveNeuronReport {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MlpWaveReport {
     pub neuron_reports: Vec<MlpWaveNeuronReport>,
 }
@@ -132,6 +136,7 @@ impl PairwiseManifoldConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PairwiseManifoldPairReport {
     pub neuron_a: usize,
     pub neuron_b: usize,
@@ -163,6 +168,7 @@ pub struct DiagonalRidgeConfig {
 }
 
 impl DiagonalRidgeConfig {
+    #[allow(dead_code)]
     pub fn default_for_modulus(modulus: usize) -> Self {
         let max_lag = (modulus / 10).max(4).min(20);
         Self {
@@ -175,6 +181,7 @@ impl DiagonalRidgeConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DiagonalRidgeReport {
     pub neuron_index: usize,
     pub diagonal_score: f64,
@@ -192,6 +199,7 @@ pub struct SnakeCurveConfig {
 }
 
 impl SnakeCurveConfig {
+    #[allow(dead_code)]
     pub fn default_for_modulus(modulus: usize) -> Self {
         Self {
             early_step_max: 1000,
@@ -204,6 +212,7 @@ impl SnakeCurveConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WeightNormDecayConfig {
     pub min_relative_decrease: f64,
     pub plateau_min_step: usize,
@@ -221,6 +230,7 @@ impl WeightNormDecayConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WeightNormDecayReport {
     pub initial_norm: f64,
     pub final_norm: f64,
@@ -229,6 +239,7 @@ pub struct WeightNormDecayReport {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SnakeCurveReport {
     pub train_converged_by_step: usize,
     pub val_plateau_max_acc: f32,
@@ -393,6 +404,8 @@ fn verify_loss_drop(
     Ok(after_avg / before_avg)
 }
 
+/// NOTE: Verification function reserved for future integration or manual analysis
+#[allow(dead_code)]
 pub fn verify_restricted_loss_early_drop(
     full_losses: &[(usize, f64)],
     restricted_losses: &[(usize, f64)],
@@ -510,6 +523,8 @@ pub fn verify_excluded_loss_spike(
     })
 }
 
+/// NOTE: Verification function reserved for future integration or manual analysis
+#[allow(dead_code)]
 pub fn verify_mlp_activation_waves<B: Backend>(
     model: &Transformer<B>,
     device: &B::Device,
@@ -539,6 +554,8 @@ pub fn verify_mlp_activation_waves<B: Backend>(
     verify_mlp_activation_waves_from_signals(&signals, config)
 }
 
+/// NOTE: Verification function reserved for future integration or manual analysis
+#[allow(dead_code)]
 pub fn verify_mlp_activation_waves_from_signals(
     signals: &[(usize, Vec<f64>)],
     config: &MlpWaveVerificationConfig,
@@ -655,6 +672,8 @@ pub fn collect_mlp_activation_surface<B: Backend>(
     Ok(surface)
 }
 
+/// NOTE: Verification function reserved for future integration or manual analysis
+#[allow(dead_code)]
 pub fn verify_constructive_interference_surface_from_grid(
     surface: &[Vec<f64>],
     config: &DiagonalRidgeConfig,
@@ -867,6 +886,8 @@ fn pairwise_circularity_metrics(points: &[(f64, f64)]) -> Result<(f64, f64, f64)
     Ok((score, radius_cv, axis_ratio))
 }
 
+// Helper functions for verification - reserved for future integration
+#[allow(dead_code)]
 fn baseline_loss(
     losses: &[(usize, f64)],
     plateau_min_step: usize,
@@ -886,6 +907,7 @@ fn baseline_loss(
     Ok(window.iter().sum::<f64>() / drop_window as f64)
 }
 
+#[allow(dead_code)]
 fn find_drop_step(
     losses: &[(usize, f64)],
     plateau_min_step: usize,
@@ -939,6 +961,7 @@ fn collect_mlp_post_relu_activations<B: Backend>(
     Ok(per_neuron)
 }
 
+#[allow(dead_code)]
 fn surface_autocorrelation_scores(
     surface: &[Vec<f64>],
     max_lag: usize,
@@ -966,6 +989,7 @@ fn surface_autocorrelation_scores(
     Ok((diag_main, diag_anti, axis_x, axis_y))
 }
 
+#[allow(dead_code)]
 fn surface_dimensions(surface: &[Vec<f64>]) -> Result<(usize, usize), String> {
     let height = surface.len();
     if height == 0 {
@@ -988,6 +1012,7 @@ fn surface_dimensions(surface: &[Vec<f64>]) -> Result<(usize, usize), String> {
     Ok((height, width))
 }
 
+#[allow(dead_code)]
 fn surface_mean_variance(surface: &[Vec<f64>]) -> Result<(f64, f64), String> {
     let (height, width) = surface_dimensions(surface)?;
     let mut sum = 0.0;
@@ -1009,6 +1034,7 @@ fn surface_mean_variance(surface: &[Vec<f64>]) -> Result<(f64, f64), String> {
     Ok((mean, variance))
 }
 
+#[allow(dead_code)]
 fn average_autocorrelation(
     surface: &[Vec<f64>],
     mean: f64,
@@ -1058,6 +1084,7 @@ fn average_autocorrelation(
     Ok(total / lag_count as f64)
 }
 
+#[allow(dead_code)]
 fn analyze_mlp_activation_wave(
     neuron_index: usize,
     signal: &[f64],
@@ -1108,6 +1135,7 @@ fn analyze_mlp_activation_wave(
     })
 }
 
+#[allow(dead_code)]
 fn dominant_frequency_ratio(signal: &[f64]) -> Result<(usize, f64), String> {
     if signal.len() < 2 {
         return Err("signal too short for FFT".to_string());
@@ -1151,6 +1179,7 @@ fn dominant_frequency_ratio(signal: &[f64]) -> Result<(usize, f64), String> {
     Ok((dominant_idx, ratio))
 }
 
+#[allow(dead_code)]
 fn best_rectified_sine_correlation(signal: &[f64], frequency: usize, phase_steps: usize) -> f64 {
     if signal.is_empty() || frequency == 0 || phase_steps == 0 {
         return 0.0;
@@ -1175,6 +1204,7 @@ fn best_rectified_sine_correlation(signal: &[f64], frequency: usize, phase_steps
     best
 }
 
+#[allow(dead_code)]
 fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -1341,6 +1371,8 @@ pub fn verify_weight_norm_decay(
 
 /// Verify the characteristic "snake curve" shape of grokking phenomenon
 /// on log-scale plots: train accuracy rises early, validation stays flat then jumps
+/// NOTE: Verification function reserved for future integration or manual analysis
+#[allow(dead_code)]
 pub fn verify_snake_curve_shape(
     train_acc: &[(usize, f32)],
     val_acc: &[(usize, f32)],

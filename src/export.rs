@@ -32,6 +32,8 @@ impl ActivationSurface {
     }
 
     /// Load activation surface from JSON file
+    /// NOTE: Reserved for loading activation surfaces from saved JSON files
+    #[allow(dead_code)]
     pub fn load_json<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let json = fs::read_to_string(path.as_ref())
             .map_err(|e| format!("Failed to read file: {}", e))?;

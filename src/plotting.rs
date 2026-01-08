@@ -102,6 +102,8 @@ pub fn plot_loss_history_dual(
 }
 
 /// Plot training loss over time (legacy, single loss)
+/// NOTE: Superseded by plot_loss_history_dual - kept for reference
+#[allow(dead_code)]
 pub fn plot_loss_history(
     snapshots: &[(usize, f64)], // (step, loss)
     output_path: &str,
@@ -870,18 +872,23 @@ pub fn select_interesting_dimensions(embeddings: &[Vec<f64>], n: usize) -> Vec<u
 }
 
 /// Convert viridis color to image::Rgb
+// Helper functions for alternative visualizations - reserved for future use
+#[allow(dead_code)]
 fn viridis_to_rgb(t: f64) -> Rgb<u8> {
     let color = viridis_color(t);
     Rgb([color.0, color.1, color.2])
 }
 
 /// Map token value to RGB color
+#[allow(dead_code)]
 fn token_to_rgb(token_value: usize, p: usize) -> Rgb<u8> {
     let t = token_value as f64 / (p - 1) as f64;
     viridis_to_rgb(t)
 }
 
 /// Fast 7×7 embedding grid using direct pixel manipulation
+/// NOTE: Alternative visualization approach - reserved for future use
+#[allow(dead_code)]
 pub fn plot_embedding_grid_fast(
     embeddings: &[Vec<f64>],
     dimensions: &[usize; 7],
@@ -949,6 +956,7 @@ pub fn plot_embedding_grid_fast(
 }
 
 /// Render dimension vs index plot into a cell
+#[allow(dead_code)]
 fn render_dimension_plot(
     img: &mut RgbImage,
     embeddings: &[Vec<f64>],
@@ -1001,6 +1009,7 @@ fn render_dimension_plot(
 }
 
 /// Render scatter plot into a cell
+#[allow(dead_code)]
 fn render_scatter_plot(
     img: &mut RgbImage,
     embeddings: &[Vec<f64>],
